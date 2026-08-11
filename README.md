@@ -8,9 +8,32 @@
 
 早期独立 `1.8.10 -> 26.3.27` 构建虽未修复 JP3，但当时 gRPC 分支没有调用 REALITY；修改后的版本字节从未进入 JP3 ClientHello。该实验不能排除服务端 `minClientVer`，需要在第一阶段 transport fix 上重新进行有效 A/B。
 
+## JP3 sing-box REALITY key-share probe build
+
+`1.8.1`、`1.8.10`、`26.3.27` 实机均稳定进入 `public_pki_fallback`，client version 已排除。成功对照固定为 sing-box `v1.12.25`（commit `73bfb99ebce7923c485435e4faf8571b412065a9`），其依赖 `github.com/metacubex/utls v1.8.4`。
+
+逐调用比较发现首个明确 wire 差异：sing-box 第一次 `BuildHandshakeState()` 后，从 `supported_curves` 和 `key_share` 同时删除 `X25519MLKEM768`，再执行第二次 build；dae 当前保留 1216-byte hybrid share。合成 ClientHello 对比中，双方 AEAD AAD 都与最终自动 remarshal 后的 wire（清零 SessionId）逐字节相等，且均可解密；因此当前没有证据指向 SessionId 后的自动 build 破坏 AAD。主要结构差异仍是 hybrid share，另有 sing-box gRPC ALPN `h2,http/1.1` 与 dae `h2`，后者本轮不改。
+
+新构建仅对 JP3 删除 `X25519MLKEM768`，保留 GREASE、X25519、refraction-networking/utls `v1.8.2`、h2-only ALPN 及其他全部参数。继续使用已确认的控制版本：
+
+```text
+DAE_JP3_REALITY_PROBE_VERSION=1.8.1
+```
+
+预期结构日志：
+
+```text
+singbox_keyshare_filter reference="sing-box-v1.12.25" hybrid_group="X25519MLKEM768" curve_removed=true share_removed=true
+```
+
+- workflow：`.github/workflows/build-jp3-reality-singbox-keyshare-probe.yml`
+- patch：`patches/jp3-reality-singbox-keyshare-probe-4.patch`
+- release tag：`jp3-reality-singbox-keyshare-probe-4`
+- binary/artifact：`dae-jp3-reality-singbox-keyshare-probe-arm64`
+
 ## JP3 sing-box REALITY version probe build
 
-实机 A/B 已确认 `26.3.27` 与 `1.8.10` 都能生成内部自洽的 X25519/AES-GCM ClientHello，但服务端均返回可信 public-PKI fallback。相同 JP3 节点通过 sing-box 可正常使用；sing-box `v1.10` 至 `v1.13` 及当前 testing 的 REALITY client 都把 SessionId version 固定为 `1.8.1`。因此前一轮 `1.8.10` 并非 sing-box 等价控制，服务端 `maxClientVer=1.8.1` 仍是可验证假设。
+此历史构建用于补齐 sing-box `1.8.1` 版本控制。实机结果为 `26.3.27`、`1.8.10`、`1.8.1` 全部稳定返回可信 public-PKI fallback，因此 client version 假设已被否定；构建保留用于复现，不再继续增加版本值。
 
 新构建只增加 JP3 `1.8.1` probe；默认仍为 `26.3.27`。使用：
 
