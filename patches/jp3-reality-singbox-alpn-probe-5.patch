@@ -1,0 +1,1041 @@
+diff --git a/dialer/v2ray/v2ray.go b/dialer/v2ray/v2ray.go
+index 3083918..9376a8b 100644
+--- a/dialer/v2ray/v2ray.go
++++ b/dialer/v2ray/v2ray.go
+@@ -163,0 +164,21 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
++		presecured := false
++		if s.TLS == "reality" {
++			u := url.URL{
++				Scheme: "reality",
++				Host:   net.JoinHostPort(s.Add, s.Port),
++				RawQuery: url.Values{
++					"sni": []string{sni},
++					"fp":  []string{s.Fingerprint},
++					"sid": []string{s.ShortId},
++					"pbk": []string{s.PublicKey},
++					"spx": []string{s.SpiderX},
++				}.Encode(),
++			}
++			realityDialer, err := tls.NewReality(u.String(), d)
++			if err != nil {
++				return nil, nil, err
++			}
++			realityDialer.SetNextProtos([]string{"h2"})
++			d = realityDialer
++			presecured = true
++		}
+@@ -168,0 +190 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
++			Presecured:    presecured,
+diff --git a/dialer/v2ray/v2ray_test.go b/dialer/v2ray/v2ray_test.go
+new file mode 100644
+index 0000000..45dcdcd
+--- /dev/null
++++ b/dialer/v2ray/v2ray_test.go
+@@ -0,0 +1,76 @@
++package v2ray
++
++import (
++	"context"
++	"crypto/ecdh"
++	"crypto/rand"
++	"encoding/base64"
++	"encoding/hex"
++	"errors"
++	"testing"
++
++	"github.com/daeuniverse/outbound/dialer"
++	"github.com/daeuniverse/outbound/netproxy"
++	_ "github.com/daeuniverse/outbound/protocol/vless"
++	transportgrpc "github.com/daeuniverse/outbound/transport/grpc"
++	outboundtls "github.com/daeuniverse/outbound/transport/tls"
++)
++
++type constructionTestDialer struct{}
++
++func (constructionTestDialer) DialContext(context.Context, string, string) (netproxy.Conn, error) {
++	return nil, errors.New("unexpected dial")
++}
++
++func randomHex(t *testing.T, size int) string {
++	t.Helper()
++	value := make([]byte, size)
++	if _, err := rand.Read(value); err != nil {
++		t.Fatalf("generate random test value: %v", err)
++	}
++	return hex.EncodeToString(value)
++}
++
++func TestVLESSRealityGRPCConstructionIncludesRealityUnderlay(t *testing.T) {
++	privateKey, err := ecdh.X25519().GenerateKey(rand.Reader)
++	if err != nil {
++		t.Fatalf("generate test key: %v", err)
++	}
++	base := constructionTestDialer{}
++	node := &V2Ray{
++		Add:         "127.0.0.1",
++		Port:        "443",
++		ID:          randomHex(t, 16),
++		Net:         "grpc",
++		SNI:         "example.com",
++		Path:        "service",
++		TLS:         "reality",
++		Fingerprint: "chrome",
++		PublicKey:   base64.RawURLEncoding.EncodeToString(privateKey.PublicKey().Bytes()),
++		ShortId:     randomHex(t, 8),
++		Protocol:    "vless",
++	}
++
++	result, _, err := node.Dialer(&dialer.ExtraOption{}, base)
++	if err != nil {
++		t.Fatalf("construct dialer: %v", err)
++	}
++	vlessLayer, ok := result.(netproxy.DialerUnwrapper)
++	if !ok {
++		t.Fatalf("outer dialer does not expose underlay: %T", result)
++	}
++	grpcLayer, ok := vlessLayer.UnwrapDialer().(*transportgrpc.Dialer)
++	if !ok {
++		t.Fatalf("VLESS underlay is not gRPC: %T", vlessLayer.UnwrapDialer())
++	}
++	if !grpcLayer.Presecured {
++		t.Fatal("REALITY gRPC underlay is not marked pre-secured")
++	}
++	realityLayer, ok := grpcLayer.NextDialer.(*outboundtls.Reality)
++	if !ok {
++		t.Fatalf("gRPC context dialer is not REALITY: %T", grpcLayer.NextDialer)
++	}
++	if realityLayer.UnwrapDialer() != base {
++		t.Fatalf("REALITY underlay changed: %T", realityLayer.UnwrapDialer())
++	}
++}
+diff --git a/pkg/jp3diag/jp3diag.go b/pkg/jp3diag/jp3diag.go
+new file mode 100644
+index 0000000..9b3ac32
+--- /dev/null
++++ b/pkg/jp3diag/jp3diag.go
+@@ -0,0 +1,44 @@
++package jp3diag
++
++import (
++	"net"
++	"strings"
++
++	"github.com/daeuniverse/outbound/pkg/logger"
++)
++
++const (
++	targetHostname = "jp3-r.link-t7.com"
++	targetIPv4     = "13.231.27.232"
++	targetPort     = "10033"
++)
++
++// IsTarget limits diagnostic output to the JP3 proxy endpoint. It never
++// resolves names or changes dialing behavior.
++func IsTarget(address string) bool {
++	host, port, err := net.SplitHostPort(address)
++	if err != nil || port != targetPort {
++		return false
++	}
++	host = strings.TrimSuffix(host, ".")
++	return strings.EqualFold(host, targetHostname) || host == targetIPv4
++}
++
++// EnabledForConn propagates the target-only diagnostic guard through transport
++// wrappers without inspecting payload or authentication data.
++func EnabledForConn(conn any) bool {
++	type diagnosticConn interface {
++		JP3Diagnostic() bool
++	}
++	diagnostic, ok := conn.(diagnosticConn)
++	return ok && diagnostic.JP3Diagnostic()
++}
++
++// Printf writes through outbound's existing logger, which dae directs to its
++// normal stderr/procd logging path.
++func Printf(stage, format string, args ...any) {
++	all := make([]any, 0, len(args)+1)
++	all = append(all, stage)
++	all = append(all, args...)
++	logger.Logger.Printf("[JP3DIAG][%s] "+format, all...)
++}
+diff --git a/protocol/vless/conn.go b/protocol/vless/conn.go
+index 3f742cc..c7650fc 100644
+--- a/protocol/vless/conn.go
++++ b/protocol/vless/conn.go
+@@ -17,0 +18 @@ import (
++	"github.com/daeuniverse/outbound/pkg/jp3diag"
+@@ -42,0 +44 @@ type Conn struct {
++	diagnostic bool
+@@ -53,3 +55,4 @@ func NewConn(conn netproxy.Conn, metadata Metadata, cmdKey []byte) (c *Conn, err
+-		Conn:     conn,
+-		metadata: metadata,
+-		cmdKey:   key,
++		Conn:       conn,
++		metadata:   metadata,
++		cmdKey:     key,
++		diagnostic: jp3diag.EnabledForConn(conn),
+@@ -142 +145,5 @@ func (c *Conn) write(b []byte) (n int, err error) {
+-				return 0, fmt.Errorf("write header: %w", err)
++				err = fmt.Errorf("write header: %w", err)
++				if c.diagnostic {
++					jp3diag.Printf("VLESS", "request_header_error error_type=%T error=%q", err, err)
++				}
++				return 0, err
+@@ -144,0 +152,3 @@ func (c *Conn) write(b []byte) (n int, err error) {
++			if c.diagnostic {
++				jp3diag.Printf("VLESS", "request_header_written")
++			}
+@@ -177,0 +188,3 @@ func (c *Conn) read(b []byte) (n int, err error) {
++				if c.diagnostic {
++					jp3diag.Printf("VLESS", "response_header_error error_type=%T error=%q", err, err)
++				}
+@@ -179,0 +193,3 @@ func (c *Conn) read(b []byte) (n int, err error) {
++			if c.diagnostic {
++				jp3diag.Printf("VLESS", "response_header_ok")
++			}
+diff --git a/transport/grpc/grpc_client.go b/transport/grpc/grpc_client.go
+index a4fcc82..4fc7ad3 100644
+--- a/transport/grpc/grpc_client.go
++++ b/transport/grpc/grpc_client.go
+@@ -5,0 +6 @@ import (
++	"crypto/x509"
+@@ -16,0 +18 @@ import (
++	"github.com/daeuniverse/outbound/pkg/jp3diag"
+@@ -22,0 +25 @@ import (
++	"google.golang.org/grpc/credentials/insecure"
+@@ -37,2 +40,2 @@ var (
+-func grpcClientCacheKey(scope, serverName, address string, allowInsecure bool, somark uint32, mptcp bool) string {
+-	return fmt.Sprintf("%s\x00%s\x00%s\x00%t\x00%d\x00%t", scope, serverName, address, allowInsecure, somark, mptcp)
++func grpcClientCacheKey(scope, serverName, address string, allowInsecure bool, somark uint32, mptcp, presecured bool, transportIdentity string) string {
++	return fmt.Sprintf("%s\x00%s\x00%s\x00%t\x00%d\x00%t\x00%t\x00%s", scope, serverName, address, allowInsecure, somark, mptcp, presecured, transportIdentity)
+@@ -105,0 +109,4 @@ type ClientConn struct {
++
++	diagnostic       bool
++	recvErrorLogOnce sync.Once
++	sendErrorLogOnce sync.Once
+@@ -108 +115 @@ type ClientConn struct {
+-func NewClientConn(tun proto.GunService_TunClient, closer context.CancelFunc) *ClientConn {
++func NewClientConn(tun proto.GunService_TunClient, closer context.CancelFunc, diagnostic bool) *ClientConn {
+@@ -120,0 +128,11 @@ func NewClientConn(tun proto.GunService_TunClient, closer context.CancelFunc) *C
++		diagnostic:  diagnostic,
++	}
++}
++
++func (c *ClientConn) JP3Diagnostic() bool {
++	return c.diagnostic
++}
++
++func (c *ClientConn) logRecvError(err error) {
++	if !c.diagnostic || err == nil {
++		return
+@@ -121,0 +140,12 @@ func NewClientConn(tun proto.GunService_TunClient, closer context.CancelFunc) *C
++	c.recvErrorLogOnce.Do(func() {
++		jp3diag.Printf("GRPC", "recv_error code=%s error_type=%T error=%q", status.Code(err), err, err)
++	})
++}
++
++func (c *ClientConn) logSendError(err error) {
++	if !c.diagnostic || err == nil {
++		return
++	}
++	c.sendErrorLogOnce.Do(func() {
++		jp3diag.Printf("GRPC", "send_error code=%s error_type=%T error=%q", status.Code(err), err, err)
++	})
+@@ -132,0 +163 @@ func (c *ClientConn) Read(p []byte) (n int, err error) {
++		c.logRecvError(os.ErrDeadlineExceeded)
+@@ -134,0 +166 @@ func (c *ClientConn) Read(p []byte) (n int, err error) {
++		c.logRecvError(io.EOF)
+@@ -165,0 +198 @@ func (c *ClientConn) Read(p []byte) (n int, err error) {
++		c.logRecvError(os.ErrDeadlineExceeded)
+@@ -167,0 +201 @@ func (c *ClientConn) Read(p []byte) (n int, err error) {
++		c.logRecvError(io.EOF)
+@@ -171,0 +206 @@ func (c *ClientConn) Read(p []byte) (n int, err error) {
++			c.logRecvError(err)
+@@ -187,0 +223 @@ func (c *ClientConn) Write(p []byte) (n int, err error) {
++		c.logSendError(os.ErrDeadlineExceeded)
+@@ -189,0 +226 @@ func (c *ClientConn) Write(p []byte) (n int, err error) {
++		c.logSendError(io.EOF)
+@@ -208,0 +246 @@ func (c *ClientConn) Write(p []byte) (n int, err error) {
++		c.logSendError(os.ErrDeadlineExceeded)
+@@ -210,0 +249 @@ func (c *ClientConn) Write(p []byte) (n int, err error) {
++		c.logSendError(io.EOF)
+@@ -212,0 +252 @@ func (c *ClientConn) Write(p []byte) (n int, err error) {
++		c.logSendError(err)
+@@ -358,0 +399 @@ type Dialer struct {
++	Presecured    bool
+@@ -370 +411,17 @@ func (d *Dialer) DialContext(ctx context.Context, network string, address string
+-	meta, cancel, err := getGrpcClientConn(ctx, d.NextDialer, d.ServerName, address, d.AllowInsecure, magicNetwork.Mark, magicNetwork.Mptcp)
++	serviceName := d.ServiceName
++	if serviceName == "" {
++		serviceName = "GunService"
++	}
++	diagnostic := jp3diag.IsTarget(address)
++	tlsImplementation := "crypto/tls via grpc-go"
++	if d.Presecured {
++		tlsImplementation = "REALITY/uTLS via context dialer"
++	}
++	if diagnostic {
++		jp3diag.Printf("GRPC", "clientconn_start remote=%q sni=%q serviceName=%q tls_implementation=%q", address, d.ServerName, serviceName, tlsImplementation)
++	}
++	transportIdentity := ""
++	if d.Presecured {
++		transportIdentity = fmt.Sprintf("%p", d)
++	}
++	meta, cancel, err := getGrpcClientConn(ctx, d.NextDialer, d.ServerName, address, d.AllowInsecure, magicNetwork.Mark, magicNetwork.Mptcp, d.Presecured, transportIdentity)
+@@ -372,0 +430,3 @@ func (d *Dialer) DialContext(ctx context.Context, network string, address string
++		if diagnostic {
++			jp3diag.Printf("GRPC", "clientconn_error code=%s error_type=%T error=%q", status.Code(err), err, err)
++		}
+@@ -374,0 +435,3 @@ func (d *Dialer) DialContext(ctx context.Context, network string, address string
++	if diagnostic {
++		jp3diag.Printf("GRPC", "clientconn_obtained state=%s readiness_unproven=true", meta.cc.GetState())
++	}
+@@ -378,3 +441,3 @@ func (d *Dialer) DialContext(ctx context.Context, network string, address string
+-	serviceName := d.ServiceName
+-	if serviceName == "" {
+-		serviceName = "GunService"
++	path := "/" + serviceName + "/Tun"
++	if diagnostic {
++		jp3diag.Printf("GRPC", "tun_start serviceName=%q path=%q", serviceName, path)
+@@ -386,0 +450,3 @@ func (d *Dialer) DialContext(ctx context.Context, network string, address string
++		if diagnostic {
++			jp3diag.Printf("GRPC", "tun_error code=%s error_type=%T error=%q", status.Code(err), err, err)
++		}
+@@ -389 +455,4 @@ func (d *Dialer) DialContext(ctx context.Context, network string, address string
+-	return NewClientConn(tun, streamCloser), nil
++	if diagnostic {
++		jp3diag.Printf("GRPC", "tun_success path=%q", path)
++	}
++	return NewClientConn(tun, streamCloser, diagnostic), nil
+@@ -392 +461 @@ func (d *Dialer) DialContext(ctx context.Context, network string, address string
+-func getGrpcClientConn(ctx context.Context, tcpDialer netproxy.Dialer, serverName string, address string, allowInsecure bool, somark uint32, mptcp bool) (*clientConnMeta, ccCanceller, error) {
++func getGrpcClientConn(ctx context.Context, tcpDialer netproxy.Dialer, serverName string, address string, allowInsecure bool, somark uint32, mptcp, presecured bool, transportIdentity string) (*clientConnMeta, ccCanceller, error) {
+@@ -394,5 +463,20 @@ func getGrpcClientConn(ctx context.Context, tcpDialer netproxy.Dialer, serverNam
+-	cacheKey := grpcClientCacheKey(scope, serverName, address, allowInsecure, somark, mptcp)
+-	// allowInsecure?
+-	roots, err := cert.GetSystemCertPool()
+-	if err != nil {
+-		return nil, func() {}, fmt.Errorf("failed to get system certificate pool")
++	// A pre-secured dialer owns connection authentication. Its caller-provided
++	// identity isolates the pooled ClientConn without putting authentication
++	// material in the cache key.
++	cacheKey := grpcClientCacheKey(scope, serverName, address, allowInsecure, somark, mptcp, presecured, transportIdentity)
++
++	var (
++		certOption grpc.DialOption
++		err        error
++	)
++	if presecured {
++		// The context dialer returns an authenticated encrypted connection.
++		// insecure credentials prevent grpc-go from adding a second TLS layer.
++		certOption = grpc.WithTransportCredentials(insecure.NewCredentials())
++	} else {
++		var roots *x509.CertPool
++		roots, err = cert.GetSystemCertPool()
++		if err != nil {
++			return nil, func() {}, fmt.Errorf("failed to get system certificate pool")
++		}
++		certOption = grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{ServerName: serverName, RootCAs: roots, InsecureSkipVerify: allowInsecure}))
+@@ -400 +483,0 @@ func getGrpcClientConn(ctx context.Context, tcpDialer netproxy.Dialer, serverNam
+-	certOption := grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{ServerName: serverName, RootCAs: roots, InsecureSkipVerify: allowInsecure}))
+diff --git a/transport/grpc/grpc_client_test.go b/transport/grpc/grpc_client_test.go
+index c4b76c2..961e904 100644
+--- a/transport/grpc/grpc_client_test.go
++++ b/transport/grpc/grpc_client_test.go
+@@ -8,0 +9 @@ import (
++	"github.com/daeuniverse/outbound/netproxy"
+@@ -97,2 +98,2 @@ func TestCleanScopedClientConnectionCacheOnlyClosesMatchingScope(t *testing.T) {
+-		grpcClientCacheKey("scope-a", "", listener1.Addr().String(), false, 0, false): {cc: cc1},
+-		grpcClientCacheKey("scope-b", "", listener2.Addr().String(), false, 0, false): {cc: cc2},
++		grpcClientCacheKey("scope-a", "", listener1.Addr().String(), false, 0, false, false, ""): {cc: cc1},
++		grpcClientCacheKey("scope-b", "", listener2.Addr().String(), false, 0, false, false, ""): {cc: cc2},
+@@ -109,0 +111,55 @@ func TestCleanScopedClientConnectionCacheOnlyClosesMatchingScope(t *testing.T) {
++type directTestDialer struct{}
++
++func (directTestDialer) DialContext(ctx context.Context, _ string, address string) (netproxy.Conn, error) {
++	return (&net.Dialer{}).DialContext(ctx, "tcp", address)
++}
++
++func TestPresecuredClientConnDoesNotAddSecondTLSLayer(t *testing.T) {
++	globalCCAccess.Lock()
++	original := globalCCMap
++	globalCCMap = nil
++	globalCCAccess.Unlock()
++	t.Cleanup(func() {
++		CleanGlobalClientConnectionCache()
++		globalCCAccess.Lock()
++		globalCCMap = original
++		globalCCAccess.Unlock()
++	})
++
++	listener, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatalf("listen: %v", err)
++	}
++	defer func() { _ = listener.Close() }()
++	server := grpcpkg.NewServer()
++	defer server.Stop()
++	go func() { _ = server.Serve(listener) }()
++
++	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
++	defer cancel()
++	meta, remove, err := getGrpcClientConn(ctx, directTestDialer{}, "", listener.Addr().String(), false, 0, false, true, "test-presecured")
++	if err != nil {
++		t.Fatalf("getGrpcClientConn: %v", err)
++	}
++	defer remove()
++	meta.cc.Connect()
++	for {
++		state := meta.cc.GetState()
++		if state == connectivity.Ready {
++			break
++		}
++		if !meta.cc.WaitForStateChange(ctx, state) {
++			t.Fatalf("client conn did not become ready: state=%v error=%v", state, ctx.Err())
++		}
++	}
++}
++
++func TestPresecuredCacheKeyIsolatedByTransportIdentity(t *testing.T) {
++	standard := grpcClientCacheKey("scope", "server", "address", false, 0, false, false, "")
++	first := grpcClientCacheKey("scope", "server", "address", false, 0, false, true, "first")
++	second := grpcClientCacheKey("scope", "server", "address", false, 0, false, true, "second")
++	if standard == first || first == second {
++		t.Fatal("security configurations share a gRPC ClientConn cache key")
++	}
++}
++
+diff --git a/transport/tls/reality.go b/transport/tls/reality.go
+index 7481a5b..5c516ac 100644
+--- a/transport/tls/reality.go
++++ b/transport/tls/reality.go
+@@ -27,0 +28 @@ import (
++	"os"
+@@ -32,0 +34 @@ import (
++	"sync/atomic"
+@@ -36,0 +39 @@ import (
++	"github.com/daeuniverse/outbound/pkg/jp3diag"
+@@ -44,3 +47,3 @@ var (
+-	Reality_Version_x byte = 1
+-	Reality_Version_y byte = 8
+-	Reality_Version_z byte = 10
++	Reality_Version_x byte = 26
++	Reality_Version_y byte = 3
++	Reality_Version_z byte = 27
+@@ -48,0 +52,30 @@ var (
++const realityProbeVersionEnv = "DAE_JP3_REALITY_PROBE_VERSION"
++
++var realityDiagnosticAttempt atomic.Uint64
++
++type realityClientVersion struct {
++	x byte
++	y byte
++	z byte
++}
++
++func selectRealityClientVersion(diagnostic bool) (version realityClientVersion, source string, err error) {
++	version = realityClientVersion{Reality_Version_x, Reality_Version_y, Reality_Version_z}
++	source = "default"
++	if !diagnostic {
++		return version, source, nil
++	}
++	switch os.Getenv(realityProbeVersionEnv) {
++	case "":
++		return version, source, nil
++	case "1.8.1":
++		return realityClientVersion{1, 8, 1}, "probe_override", nil
++	case "1.8.10":
++		return realityClientVersion{1, 8, 10}, "probe_override", nil
++	case "26.3.27":
++		return realityClientVersion{26, 3, 27}, "probe_override", nil
++	default:
++		return realityClientVersion{}, "", fmt.Errorf("REALITY: invalid %s; allowed values are 1.8.1, 1.8.10, and 26.3.27", realityProbeVersionEnv)
++	}
++}
++
+@@ -56,0 +90,2 @@ type RealityUConn struct {
++	Diagnostic bool
++	Attempt    uint64
+@@ -98,0 +134,7 @@ func realityPeerCertificates(conn *utls.Conn) ([]*x509.Certificate, error) {
++func realityCertificatePublicKeyType(cert *x509.Certificate) string {
++	if cert == nil {
++		return "unavailable"
++	}
++	return fmt.Sprintf("%T", cert.PublicKey)
++}
++
+@@ -106,0 +149 @@ func (c *RealityUConn) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [
++	keyType := realityCertificatePublicKeyType(certs[0])
+@@ -111,0 +155,3 @@ func (c *RealityUConn) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [
++			if c.Diagnostic {
++				jp3diag.Printf("REALITY", "attempt=%d peer_certificate class=%q public_key_type=%q chain_length=%d reality_hmac_match=true", c.Attempt, "reality_temporary", keyType, len(certs))
++			}
+@@ -122,0 +169,3 @@ func (c *RealityUConn) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [
++		if c.Diagnostic {
++			jp3diag.Printf("REALITY", "attempt=%d peer_certificate class=%q public_key_type=%q chain_length=%d public_pki_verified=false", c.Attempt, "unverified", keyType, len(certs))
++		}
+@@ -124,0 +174,3 @@ func (c *RealityUConn) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [
++	if c.Diagnostic {
++		jp3diag.Printf("REALITY", "attempt=%d peer_certificate class=%q public_key_type=%q chain_length=%d public_pki_verified=true", c.Attempt, "public_pki_fallback", keyType, len(certs))
++	}
+@@ -134,0 +187 @@ type Reality struct {
++	shortIdLen  int
+@@ -137,0 +191 @@ type Reality struct {
++	nextProtos  []string
+@@ -143,0 +198,5 @@ func realityECDHEKey(state *utls.PubClientHandshakeState) *ecdh.PrivateKey {
++	key, _, _ := realityAuthKeyShare(state)
++	return key
++}
++
++func realityAuthKeyShare(state *utls.PubClientHandshakeState) (key *ecdh.PrivateKey, group string, publicMatch bool) {
+@@ -145 +204 @@ func realityECDHEKey(state *utls.PubClientHandshakeState) *ecdh.PrivateKey {
+-		return nil
++		return nil, "none", false
+@@ -149 +208,11 @@ func realityECDHEKey(state *utls.PubClientHandshakeState) *ecdh.PrivateKey {
+-			return keyShareKeys.Ecdhe
++			key = keyShareKeys.Ecdhe
++			group = "X25519"
++			if state.Hello == nil {
++				return key, group, false
++			}
++			for _, share := range state.Hello.KeyShares {
++				if share.Group == utls.X25519 {
++					return key, group, bytes.Equal(share.Data, key.PublicKey().Bytes())
++				}
++			}
++			return key, group, false
+@@ -152 +221,11 @@ func realityECDHEKey(state *utls.PubClientHandshakeState) *ecdh.PrivateKey {
+-			return keyShareKeys.MlkemEcdhe
++			key = keyShareKeys.MlkemEcdhe
++			group = "X25519MLKEM768"
++			if state.Hello == nil {
++				return key, group, false
++			}
++			for _, share := range state.Hello.KeyShares {
++				if share.Group == utls.X25519MLKEM768 && len(share.Data) >= 32 {
++					return key, group, bytes.Equal(share.Data[len(share.Data)-32:], key.PublicKey().Bytes())
++				}
++			}
++			return key, group, false
+@@ -155 +234,23 @@ func realityECDHEKey(state *utls.PubClientHandshakeState) *ecdh.PrivateKey {
+-	return state.State13.EcdheKey // nolint:staticcheck
++	key = state.State13.EcdheKey // nolint:staticcheck
++	if key != nil {
++		return key, "deprecated_ecdh", true
++	}
++	return nil, "none", false
++}
++
++func realityWireSelfCheck(aead cipher.AEAD, hello *utls.PubClientHelloMsg, expectedPlaintext []byte) bool {
++	if aead == nil || hello == nil || len(hello.Random) != 32 || len(hello.SessionId) != 32 || len(hello.Raw) < 71 {
++		return false
++	}
++	aad := bytes.Clone(hello.Raw)
++	clear(aad[39:71])
++	plaintext, err := aead.Open(nil, hello.Random[20:], hello.SessionId, aad)
++	return err == nil && bytes.Equal(plaintext, expectedPlaintext)
++}
++
++func realityPeerAddress(conn netproxy.Conn) string {
++	remote, ok := conn.(interface{ RemoteAddr() net.Addr })
++	if !ok || remote.RemoteAddr() == nil {
++		return "unavailable"
++	}
++	return remote.RemoteAddr().String()
+@@ -161,0 +263,90 @@ func (x *Reality) UnwrapDialer() netproxy.Dialer {
++// SetNextProtos configures and requires application protocols for the REALITY
++// handshake. The slice is copied so callers cannot mutate live configuration.
++func (x *Reality) SetNextProtos(nextProtos []string) {
++	x.nextProtos = append(x.nextProtos[:0], nextProtos...)
++}
++
++// realityOfferedNextProtos matches sing-box's gRPC ClientHello offer for the
++// JP3 control while preserving h2 as the only acceptable negotiated protocol.
++func realityOfferedNextProtos(diagnostic bool, requiredNextProtos []string) []string {
++	offered := append([]string(nil), requiredNextProtos...)
++	if diagnostic && len(requiredNextProtos) == 1 && requiredNextProtos[0] == http2.NextProtoTLS {
++		offered = append(offered, "http/1.1")
++	}
++	return offered
++}
++
++type realityKeyShareFilterResult struct {
++	curvesBefore int
++	curvesAfter  int
++	sharesBefore int
++	sharesAfter  int
++	curveRemoved bool
++	shareRemoved bool
++}
++
++// applyRealitySingBoxKeyShareFilter reproduces sing-box v1.12.25's REALITY-only
++// removal of X25519MLKEM768. It intentionally leaves every other curve and key
++// share, including GREASE and X25519, in their original order.
++func applyRealitySingBoxKeyShareFilter(uConn *utls.UConn) realityKeyShareFilterResult {
++	var result realityKeyShareFilterResult
++	for _, extension := range uConn.Extensions {
++		switch extension := extension.(type) {
++		case *utls.SupportedCurvesExtension:
++			result.curvesBefore = len(extension.Curves)
++			filtered := extension.Curves[:0]
++			for _, curveID := range extension.Curves {
++				if curveID == utls.X25519MLKEM768 {
++					result.curveRemoved = true
++					continue
++				}
++				filtered = append(filtered, curveID)
++			}
++			extension.Curves = filtered
++			result.curvesAfter = len(extension.Curves)
++		case *utls.KeyShareExtension:
++			result.sharesBefore = len(extension.KeyShares)
++			filtered := extension.KeyShares[:0]
++			for _, share := range extension.KeyShares {
++				if share.Group == utls.X25519MLKEM768 {
++					result.shareRemoved = true
++					continue
++				}
++				filtered = append(filtered, share)
++			}
++			extension.KeyShares = filtered
++			result.sharesAfter = len(extension.KeyShares)
++		}
++	}
++	return result
++}
++
++func applyRealityNextProtos(uConn *utls.UConn, nextProtos []string) error {
++	if len(nextProtos) == 0 {
++		return nil
++	}
++	for _, extension := range uConn.Extensions {
++		alpn, ok := extension.(*utls.ALPNExtension)
++		if !ok {
++			continue
++		}
++		alpn.AlpnProtocols = append(alpn.AlpnProtocols[:0], nextProtos...)
++		// Re-apply extensions and marshal Hello.Raw before REALITY authenticates
++		// the complete ClientHello as AEAD associated data.
++		return uConn.BuildHandshakeState()
++	}
++	return errors.New("REALITY: selected fingerprint has no ALPN extension")
++}
++
++func realityNegotiatedNextProto(negotiated string, nextProtos []string) bool {
++	if len(nextProtos) == 0 {
++		return true
++	}
++	for _, nextProto := range nextProtos {
++		if negotiated == nextProto {
++			return true
++		}
++	}
++	return false
++}
++
+@@ -174 +365 @@ func NewReality(s string, d netproxy.Dialer) (*Reality, error) {
+-	_, err = hex.Decode(x.shortId[:], []byte(query.Get("sid")))
++	x.shortIdLen, err = hex.Decode(x.shortId[:], []byte(query.Get("sid")))
+@@ -181,3 +372,3 @@ func NewReality(s string, d netproxy.Dialer) (*Reality, error) {
+-	_, err = base64.RawURLEncoding.Decode(publicKey[:], []byte(_publicKey))
+-	if err != nil {
+-		return nil, fmt.Errorf("invalid reality pbk")
++	publicKeyLen, err := base64.RawURLEncoding.Decode(publicKey[:], []byte(_publicKey))
++	if err != nil || publicKeyLen != x25519ScalarSize {
++		return nil, fmt.Errorf("invalid reality pbk length: got %d bytes, want %d", publicKeyLen, x25519ScalarSize)
+@@ -241,0 +433,10 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++	diagnostic := jp3diag.IsTarget(addr)
++	offeredNextProtos := realityOfferedNextProtos(diagnostic, x.nextProtos)
++	version, versionSource, err := selectRealityClientVersion(diagnostic)
++	if err != nil {
++		return nil, err
++	}
++	attempt := uint64(0)
++	if diagnostic {
++		attempt = realityDiagnosticAttempt.Add(1)
++	}
+@@ -247 +448,10 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
+-			return nil, fmt.Errorf("[REALITY]: dial to %s: %w", addr, err)
++			err = fmt.Errorf("[REALITY]: dial to %s: %w", addr, err)
++			if diagnostic {
++				jp3diag.Printf("REALITY", "attempt=%d handshake_error phase=transport_dial remote=%q error_type=%T error=%q", attempt, addr, err, err)
++			}
++			return nil, err
++		}
++		if diagnostic {
++			tagBytes := x.shortIdLen
++			jp3diag.Printf("REALITY", "attempt=%d transport_connected requested=%q peer=%q", attempt, addr, realityPeerAddress(c))
++			jp3diag.Printf("REALITY", "attempt=%d config_shape public_key_bytes=32 short_id_bytes=%d fingerprint=%q", attempt, tagBytes, x.fingerprint.Client)
+@@ -251 +461 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
+-		uConn := &RealityUConn{}
++		uConn := &RealityUConn{Diagnostic: diagnostic, Attempt: attempt}
+@@ -259,0 +470,3 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++		if diagnostic {
++			jp3diag.Printf("REALITY", "attempt=%d handshake_start remote=%q sni=%q tls_implementation=%q fingerprint=%q alpn_offer=%q alpn_required=%q version=%q version_source=%q retry=%d", attempt, addr, uConn.ServerName, "uTLS", x.fingerprint.Client, offeredNextProtos, x.nextProtos, fmt.Sprintf("%d.%d.%d", version.x, version.y, version.z), versionSource, retry)
++		}
+@@ -267,0 +481,3 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++				if diagnostic {
++					jp3diag.Printf("REALITY", "attempt=%d handshake_error phase=build_state error_type=%T error=%q", attempt, err, err)
++				}
+@@ -269,0 +486,18 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++			var keyShareFilter realityKeyShareFilterResult
++			if diagnostic {
++				keyShareFilter = applyRealitySingBoxKeyShareFilter(uConn.UConn)
++				if !keyShareFilter.curveRemoved || !keyShareFilter.shareRemoved {
++					err = errors.New("REALITY: sing-box key-share probe requires X25519MLKEM768 in selected fingerprint")
++					jp3diag.Printf("REALITY", "attempt=%d handshake_error phase=singbox_keyshare_filter curve_removed=%t share_removed=%t curves_before=%d curves_after=%d shares_before=%d shares_after=%d error=%q", attempt, keyShareFilter.curveRemoved, keyShareFilter.shareRemoved, keyShareFilter.curvesBefore, keyShareFilter.curvesAfter, keyShareFilter.sharesBefore, keyShareFilter.sharesAfter, err)
++					return nil, err
++				}
++			}
++			if err = applyRealityNextProtos(uConn.UConn, offeredNextProtos); err != nil {
++				if diagnostic {
++					jp3diag.Printf("REALITY", "attempt=%d handshake_error phase=alpn_config error_type=%T error=%q", attempt, err, err)
++				}
++				return nil, err
++			}
++			if diagnostic {
++				jp3diag.Printf("REALITY", "attempt=%d singbox_keyshare_filter reference=%q hybrid_group=%q curve_removed=%t share_removed=%t curves_before=%d curves_after=%d shares_before=%d shares_after=%d", attempt, "sing-box-v1.12.25", "X25519MLKEM768", keyShareFilter.curveRemoved, keyShareFilter.shareRemoved, keyShareFilter.curvesBefore, keyShareFilter.curvesAfter, keyShareFilter.sharesBefore, keyShareFilter.sharesAfter)
++			}
+@@ -270,0 +505,3 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++			if len(hello.Raw) < 71 {
++				return nil, errors.New("REALITY: malformed ClientHello raw buffer")
++			}
+@@ -273,3 +510,3 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
+-			hello.SessionId[0] = Reality_Version_x
+-			hello.SessionId[1] = Reality_Version_y
+-			hello.SessionId[2] = Reality_Version_z
++			hello.SessionId[0] = version.x
++			hello.SessionId[1] = version.y
++			hello.SessionId[2] = version.z
+@@ -277 +514,2 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
+-			binary.BigEndian.PutUint32(hello.SessionId[4:], uint32(time.Now().Unix()))
++			clientTime := time.Now()
++			binary.BigEndian.PutUint32(hello.SessionId[4:], uint32(clientTime.Unix()))
+@@ -279,4 +517,2 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
+-			// if config.Show {
+-			// logrus.Printf("REALITY hello.SessionId[:16]: %v\n", hello.SessionId[:16])
+-			// }
+-			ecdheKey := realityECDHEKey(&uConn.HandshakeState)
++			plainSessionId := bytes.Clone(hello.SessionId[:16])
++			ecdheKey, keyShareGroup, keyShareMatch := realityAuthKeyShare(&uConn.HandshakeState)
+@@ -284 +519,0 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
+-				// logrus.Println("wtf", retry, addr)
+@@ -286 +521,5 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
+-					return nil, errors.New("nil ecdheKey")
++					err = errors.New("nil ecdheKey")
++					if diagnostic {
++						jp3diag.Printf("REALITY", "attempt=%d handshake_error phase=key_share error_type=%T error=%q", attempt, err, err)
++					}
++					return nil, err
+@@ -291,4 +530,14 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
+-			// logrus.Println("OH YEAH", retry)
+-			uConn.AuthKey, _ = ecdheKey.ECDH(x.publicKey)
+-			if uConn.AuthKey == nil {
+-				return nil, errors.New("REALITY: SharedKey == nil")
++			if !keyShareMatch {
++				err = errors.New("REALITY: authentication private key does not match ClientHello key share")
++				if diagnostic {
++					jp3diag.Printf("REALITY", "attempt=%d handshake_error phase=key_share_match group=%q match=false error=%q", attempt, keyShareGroup, err)
++				}
++				return nil, err
++			}
++			uConn.AuthKey, err = ecdheKey.ECDH(x.publicKey)
++			if err != nil || uConn.AuthKey == nil {
++				err = errors.New("REALITY: SharedKey == nil")
++				if diagnostic {
++					jp3diag.Printf("REALITY", "attempt=%d handshake_error phase=key_agreement error_type=%T error=%q", attempt, err, err)
++				}
++				return nil, err
+@@ -296,0 +546,3 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++				if diagnostic {
++					jp3diag.Printf("REALITY", "attempt=%d handshake_error phase=key_derivation error_type=%T error=%q", attempt, err, err)
++				}
+@@ -299,0 +552 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++			aeadName := "ChaCha20-Poly1305"
+@@ -302,0 +556 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++				aeadName = "AES-GCM"
+@@ -306,3 +559,0 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
+-			// if config.Show {
+-			// logrus.Printf("REALITY uConn.AuthKey[:16]: %v\tAEAD: %T\n", uConn.AuthKey[:16], aead)
+-			// }
+@@ -310,0 +562,7 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++			wireSelfCheck := realityWireSelfCheck(aead, hello, plainSessionId)
++			if diagnostic {
++				jp3diag.Printf("REALITY", "attempt=%d clienthello_ready local_time_utc=%q unix=%d tls13_offered=true auth_keyshare=%q keyshare_match=%t auth_aead=%q session_id_length=%d raw_length=%d alpn=%q wire_selfcheck=%t", attempt, clientTime.UTC().Format(time.RFC3339), clientTime.Unix(), keyShareGroup, keyShareMatch, aeadName, len(hello.SessionId), len(hello.Raw), hello.AlpnProtocols, wireSelfCheck)
++			}
++			if !wireSelfCheck {
++				return nil, errors.New("REALITY: ClientHello wire self-check failed")
++			}
+@@ -313,0 +572,3 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++			if diagnostic {
++				jp3diag.Printf("REALITY", "attempt=%d handshake_error phase=utls error_type=%T error=%q", attempt, err, err)
++			}
+@@ -319,0 +581 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++		state := uConn.ConnectionState()
+@@ -320,0 +583,4 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++			if diagnostic {
++				jp3diag.Printf("REALITY", "attempt=%d admission_rejected verified=false alpn=%q fallback_certificate_verified=true server_reason_observable=false possible_stages=%q", attempt, state.NegotiatedProtocol, "sni,aead,version,time,short_id,backend")
++				jp3diag.Printf("REALITY", "attempt=%d handshake_error phase=reality_verification verified=false alpn=%q error=%q", attempt, state.NegotiatedProtocol, "REALITY: processed invalid connection")
++			}
+@@ -408,0 +675,12 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++		if !realityNegotiatedNextProto(state.NegotiatedProtocol, x.nextProtos) {
++			err = fmt.Errorf("REALITY: unexpected negotiated ALPN %q", state.NegotiatedProtocol)
++			if diagnostic {
++				jp3diag.Printf("REALITY", "attempt=%d handshake_error phase=alpn_negotiation verified=true alpn=%q alpn_offer=%q alpn_required=%q error_type=%T error=%q", attempt, state.NegotiatedProtocol, offeredNextProtos, x.nextProtos, err, err)
++			}
++			_ = uConn.Close()
++			return nil, err
++		}
++		if diagnostic {
++			jp3diag.Printf("REALITY", "attempt=%d admission_accepted verified=true", attempt)
++			jp3diag.Printf("REALITY", "attempt=%d handshake_success verified=true alpn=%q", attempt, state.NegotiatedProtocol)
++		}
+diff --git a/transport/tls/reality_test.go b/transport/tls/reality_test.go
+index 656b754..d580a3b 100644
+--- a/transport/tls/reality_test.go
++++ b/transport/tls/reality_test.go
+@@ -3,0 +4,3 @@ import (
++	"bytes"
++	"crypto/aes"
++	"crypto/cipher"
+@@ -66,0 +70,170 @@ func TestRealityECDHEKeyFallsBackToDeprecatedField(t *testing.T) {
++func TestRealityAuthKeyShareMatchesChromeWireKey(t *testing.T) {
++	client, server := net.Pipe()
++	defer func() { _ = client.Close() }()
++	defer func() { _ = server.Close() }()
++
++	uConn := utls.UClient(client, &utls.Config{InsecureSkipVerify: true}, utls.HelloChrome_Auto)
++	if err := uConn.BuildHandshakeState(); err != nil {
++		t.Fatalf("BuildHandshakeState: %v", err)
++	}
++	key, group, match := realityAuthKeyShare(&uConn.HandshakeState)
++	if key == nil || group != "X25519" || !match {
++		t.Fatalf("unexpected auth key share: key_nil=%t group=%q match=%t", key == nil, group, match)
++	}
++}
++
++func TestApplyRealitySingBoxKeyShareFilter(t *testing.T) {
++	client, server := net.Pipe()
++	defer func() { _ = client.Close() }()
++	defer func() { _ = server.Close() }()
++
++	uConn := utls.UClient(client, &utls.Config{InsecureSkipVerify: true}, utls.HelloChrome_Auto)
++	if err := uConn.BuildHandshakeState(); err != nil {
++		t.Fatalf("BuildHandshakeState: %v", err)
++	}
++	result := applyRealitySingBoxKeyShareFilter(uConn)
++	if !result.curveRemoved || !result.shareRemoved {
++		t.Fatalf("expected hybrid curve and share removal: %#v", result)
++	}
++	if result.curvesAfter != result.curvesBefore-1 || result.sharesAfter != result.sharesBefore-1 {
++		t.Fatalf("unexpected filter counts: %#v", result)
++	}
++	if err := uConn.BuildHandshakeState(); err != nil {
++		t.Fatalf("BuildHandshakeState after filter: %v", err)
++	}
++	for _, extension := range uConn.Extensions {
++		switch extension := extension.(type) {
++		case *utls.SupportedCurvesExtension:
++			for _, curveID := range extension.Curves {
++				if curveID == utls.X25519MLKEM768 {
++					t.Fatal("hybrid curve remains after filter")
++				}
++			}
++		case *utls.KeyShareExtension:
++			for _, share := range extension.KeyShares {
++				if share.Group == utls.X25519MLKEM768 {
++					t.Fatal("hybrid key share remains after filter")
++				}
++			}
++		}
++	}
++	key, group, match := realityAuthKeyShare(&uConn.HandshakeState)
++	if key == nil || group != "X25519" || !match {
++		t.Fatalf("unexpected filtered auth key share: key_nil=%t group=%q match=%t", key == nil, group, match)
++	}
++}
++
++func TestRealityAuthenticatedAADMatchesFinalRemarshal(t *testing.T) {
++	client, server := net.Pipe()
++	defer func() { _ = client.Close() }()
++	defer func() { _ = server.Close() }()
++
++	uConn := utls.UClient(client, &utls.Config{InsecureSkipVerify: true, SessionTicketsDisabled: true}, utls.HelloChrome_Auto)
++	if err := uConn.BuildHandshakeState(); err != nil {
++		t.Fatalf("initial BuildHandshakeState: %v", err)
++	}
++	result := applyRealitySingBoxKeyShareFilter(uConn)
++	if !result.curveRemoved || !result.shareRemoved {
++		t.Fatalf("expected hybrid curve and share removal: %#v", result)
++	}
++	if err := applyRealityNextProtos(uConn, []string{"h2"}); err != nil {
++		t.Fatalf("applyRealityNextProtos: %v", err)
++	}
++
++	hello := uConn.HandshakeState.Hello
++	hello.SessionId = make([]byte, 32)
++	copy(hello.Raw[39:], hello.SessionId)
++	authenticatedAAD := bytes.Clone(hello.Raw)
++	plaintext := []byte("0123456789abcdef")
++	block, err := aes.NewCipher(make([]byte, 32))
++	if err != nil {
++		t.Fatalf("aes.NewCipher: %v", err)
++	}
++	aead, err := cipher.NewGCM(block)
++	if err != nil {
++		t.Fatalf("cipher.NewGCM: %v", err)
++	}
++	hello.SessionId = aead.Seal(hello.SessionId[:0], hello.Random[20:], plaintext, hello.Raw)
++	copy(hello.Raw[39:], hello.SessionId)
++
++	// HandshakeContext automatically performs this same final remarshal before
++	// writing ClientHello to the connection.
++	if err := uConn.BuildHandshakeState(); err != nil {
++		t.Fatalf("final BuildHandshakeState: %v", err)
++	}
++	finalAAD := bytes.Clone(hello.Raw)
++	clear(finalAAD[39:71])
++	if !bytes.Equal(finalAAD, authenticatedAAD) {
++		t.Fatal("authenticated AAD differs from final remarshal outside SessionId")
++	}
++	if !realityWireSelfCheck(aead, hello, plaintext) {
++		t.Fatal("final remarshal does not decrypt with authenticated AAD")
++	}
++}
++
++func TestRealityWireSelfCheck(t *testing.T) {
++	block, err := aes.NewCipher(make([]byte, 32))
++	if err != nil {
++		t.Fatalf("aes.NewCipher: %v", err)
++	}
++	var aead cipher.AEAD
++	aead, err = cipher.NewGCM(block)
++	if err != nil {
++		t.Fatalf("cipher.NewGCM: %v", err)
++	}
++	hello := &utls.PubClientHelloMsg{
++		Raw:       make([]byte, 96),
++		Random:    make([]byte, 32),
++		SessionId: make([]byte, 32),
++	}
++	plaintext := []byte("0123456789abcdef")
++	hello.SessionId = aead.Seal(hello.SessionId[:0], hello.Random[20:], plaintext, hello.Raw)
++	copy(hello.Raw[39:], hello.SessionId)
++	if !realityWireSelfCheck(aead, hello, plaintext) {
++		t.Fatal("expected wire self-check to pass")
++	}
++	hello.Raw[80] ^= 1
++	if realityWireSelfCheck(aead, hello, plaintext) {
++		t.Fatal("expected modified associated data to fail")
++	}
++}
++
++func TestSelectRealityClientVersion(t *testing.T) {
++	t.Setenv(realityProbeVersionEnv, "")
++	version, source, err := selectRealityClientVersion(true)
++	if err != nil || version != (realityClientVersion{26, 3, 27}) || source != "default" {
++		t.Fatalf("unexpected default: version=%v source=%q err=%v", version, source, err)
++	}
++
++	t.Setenv(realityProbeVersionEnv, "1.8.1")
++	version, source, err = selectRealityClientVersion(true)
++	if err != nil || version != (realityClientVersion{1, 8, 1}) || source != "probe_override" {
++		t.Fatalf("unexpected sing-box override: version=%v source=%q err=%v", version, source, err)
++	}
++
++	t.Setenv(realityProbeVersionEnv, "1.8.10")
++	version, source, err = selectRealityClientVersion(true)
++	if err != nil || version != (realityClientVersion{1, 8, 10}) || source != "probe_override" {
++		t.Fatalf("unexpected legacy override: version=%v source=%q err=%v", version, source, err)
++	}
++
++	t.Setenv(realityProbeVersionEnv, "unsupported")
++	if _, _, err = selectRealityClientVersion(true); err == nil {
++		t.Fatal("expected invalid probe version to fail")
++	}
++}
++
++func TestSelectRealityClientVersionIgnoresProbeForOtherTargets(t *testing.T) {
++	t.Setenv(realityProbeVersionEnv, "1.8.1")
++	version, source, err := selectRealityClientVersion(false)
++	if err != nil || version != (realityClientVersion{26, 3, 27}) || source != "default" {
++		t.Fatalf("unexpected non-target version: version=%v source=%q err=%v", version, source, err)
++	}
++}
++
++func TestNewRealityRejectsShortPublicKey(t *testing.T) {
++	if _, err := NewReality("reality://example.invalid:443?sni=example.invalid&fp=chrome&pbk=AA", nil); err == nil {
++		t.Fatal("expected short public key to fail")
++	}
++}
++
+@@ -99,0 +273,69 @@ func TestRealityVerifyPeerCertificateRejectsUnavailablePeerCertificates(t *testi
++
++func TestRealitySetNextProtosCopiesInput(t *testing.T) {
++	reality := &Reality{}
++	nextProtos := []string{"h2"}
++	reality.SetNextProtos(nextProtos)
++	nextProtos[0] = "mutated"
++	if len(reality.nextProtos) != 1 || reality.nextProtos[0] != "h2" {
++		t.Fatalf("unexpected stored protocols: %#v", reality.nextProtos)
++	}
++}
++
++func TestRealityOfferedNextProtosJP3GRPCControl(t *testing.T) {
++	required := []string{"h2"}
++	offered := realityOfferedNextProtos(true, required)
++	if !reflect.DeepEqual(offered, []string{"h2", "http/1.1"}) {
++		t.Fatalf("unexpected JP3 offer: %#v", offered)
++	}
++	offered[0] = "mutated"
++	if !reflect.DeepEqual(required, []string{"h2"}) {
++		t.Fatalf("required protocols mutated: %#v", required)
++	}
++}
++
++func TestRealityOfferedNextProtosDoesNotChangeOtherTargets(t *testing.T) {
++	if got := realityOfferedNextProtos(false, []string{"h2"}); !reflect.DeepEqual(got, []string{"h2"}) {
++		t.Fatalf("unexpected non-JP3 offer: %#v", got)
++	}
++	if got := realityOfferedNextProtos(true, []string{"custom"}); !reflect.DeepEqual(got, []string{"custom"}) {
++		t.Fatalf("unexpected non-gRPC offer: %#v", got)
++	}
++}
++
++func TestApplyRealityNextProtosUpdatesClientHello(t *testing.T) {
++	client, server := net.Pipe()
++	defer func() { _ = client.Close() }()
++	defer func() { _ = server.Close() }()
++
++	uConn := utls.UClient(client, &utls.Config{InsecureSkipVerify: true}, utls.HelloChrome_Auto)
++	if err := uConn.BuildHandshakeState(); err != nil {
++		t.Fatalf("BuildHandshakeState: %v", err)
++	}
++	if err := applyRealityNextProtos(uConn, []string{"h2"}); err != nil {
++		t.Fatalf("applyRealityNextProtos: %v", err)
++	}
++	if got := uConn.HandshakeState.Hello.AlpnProtocols; len(got) != 1 || got[0] != "h2" {
++		t.Fatalf("unexpected ClientHello ALPN: %#v", got)
++	}
++	for _, extension := range uConn.Extensions {
++		if alpn, ok := extension.(*utls.ALPNExtension); ok {
++			if len(alpn.AlpnProtocols) != 1 || alpn.AlpnProtocols[0] != "h2" {
++				t.Fatalf("unexpected ALPN extension: %#v", alpn.AlpnProtocols)
++			}
++			return
++		}
++	}
++	t.Fatal("Chrome fingerprint has no ALPN extension")
++}
++
++func TestRealityNegotiatedNextProto(t *testing.T) {
++	if !realityNegotiatedNextProto("h2", []string{"h2"}) {
++		t.Fatal("expected h2 to be accepted")
++	}
++	if realityNegotiatedNextProto("http/1.1", []string{"h2"}) {
++		t.Fatal("unexpected HTTP/1.1 accepted for gRPC")
++	}
++	if realityNegotiatedNextProto("", []string{"h2"}) {
++		t.Fatal("unexpected empty ALPN accepted for gRPC")
++	}
++}

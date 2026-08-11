@@ -8,6 +8,28 @@
 
 早期独立 `1.8.10 -> 26.3.27` 构建虽未修复 JP3，但当时 gRPC 分支没有调用 REALITY；修改后的版本字节从未进入 JP3 ClientHello。该实验不能排除服务端 `minClientVer`，需要在第一阶段 transport fix 上重新进行有效 A/B。
 
+## JP3 sing-box REALITY ALPN probe build
+
+key-share 单变量实机结果已建立因果：删除 `X25519MLKEM768` 后，JP3 从 `public_pki_fallback / admission_rejected` 稳定推进为 `reality_temporary / reality_hmac_match=true / verified=true`。MLKEM hybrid share 是此前 admission failure 的关键 wire 差异，后续构建固定保留该 filter。
+
+新的首个失败点为 ALPN：ClientHello 提供 `alpn=["h2"]`，REALITY admission 成功后 negotiated ALPN 为空。本轮仅对 JP3 把 offer 对齐 sing-box gRPC：
+
+```text
+alpn_offer=["h2","http/1.1"]
+alpn_required=["h2"]
+```
+
+校验不会放宽：只有 negotiated `h2` 可成功；空值或 `http/1.1` 均继续在 `phase=alpn_negotiation` 失败。版本保持 `1.8.1`，MLKEM filter、X25519、uTLS fork、SNI、认证参数、gRPC 与 VLESS 均不变。
+
+```text
+DAE_JP3_REALITY_PROBE_VERSION=1.8.1
+```
+
+- workflow：`.github/workflows/build-jp3-reality-singbox-alpn-probe.yml`
+- patch：`patches/jp3-reality-singbox-alpn-probe-5.patch`
+- release tag：`jp3-reality-singbox-alpn-probe-5`
+- binary/artifact：`dae-jp3-reality-singbox-alpn-probe-arm64`
+
 ## JP3 sing-box REALITY key-share probe build
 
 `1.8.1`、`1.8.10`、`26.3.27` 实机均稳定进入 `public_pki_fallback`，client version 已排除。成功对照固定为 sing-box `v1.12.25`（commit `73bfb99ebce7923c485435e4faf8571b412065a9`），其依赖 `github.com/metacubex/utls v1.8.4`。
