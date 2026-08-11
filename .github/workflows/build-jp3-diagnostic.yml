@@ -205,10 +205,11 @@ jobs:
           echo "Diagnostic outbound checkout: $(git -C source/outbound rev-parse HEAD)"
           sha256sum source/outbound/transport/tls/reality.go patches/jp3-diagnostic-1.patch
           strings "$binary" > "$RUNNER_TEMP/binary-strings.txt"
-          grep -F "$BUILD_VERSION" "$RUNNER_TEMP/binary-strings.txt"
-          grep -F '[JP3DIAG][%s]' "$RUNNER_TEMP/binary-strings.txt"
-          grep -F 'handshake_not_used' "$RUNNER_TEMP/binary-strings.txt"
-          grep -F 'response_header_error' "$RUNNER_TEMP/binary-strings.txt"
+          grep -Fq "$BUILD_VERSION" "$RUNNER_TEMP/binary-strings.txt"
+          grep -Fq '[JP3DIAG][%s]' "$RUNNER_TEMP/binary-strings.txt"
+          grep -Fq 'handshake_not_used' "$RUNNER_TEMP/binary-strings.txt"
+          grep -Fq 'response_header_error' "$RUNNER_TEMP/binary-strings.txt"
+          echo "Embedded diagnostic markers verified without printing binary strings."
 
       - name: Prepare release files
         shell: bash
