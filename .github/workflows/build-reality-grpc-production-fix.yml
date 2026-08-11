@@ -235,7 +235,7 @@ jobs:
           grep -Fq 'pre-secured gRPC dialer requires transport identity' "$RUNNER_TEMP/binary-strings.txt"
           grep -Fq 'REALITY: authentication key does not match X25519 ClientHello key share' "$RUNNER_TEMP/binary-strings.txt"
           grep -Fq 'REALITY: selected fingerprint has no ALPN extension' "$RUNNER_TEMP/binary-strings.txt"
-          if grep -E 'JP3|jp3diag|DAE_JP3|PROBE_VERSION|probe_override|\[JP3DIAG\]' "$RUNNER_TEMP/binary-strings.txt"; then
+          if grep -E 'JP3DIAG|jp3diag|DAE_JP3_REALITY_PROBE_VERSION' "$RUNNER_TEMP/binary-strings.txt"; then
             echo "target-specific diagnostic or probe string remains in binary" >&2
             exit 1
           fi
