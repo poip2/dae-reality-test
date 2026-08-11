@@ -4,9 +4,30 @@
 
 ## 实机实验结果
 
-`REALITY client version 1.8.10 -> 26.3.27`：**FAILED TO FIX JP3**。
+第一阶段修复已由 OpenWrt 实机确认：JP3 的 `security=reality + type=grpc` 现在实际执行 REALITY/uTLS，原先普通 TLS 路径返回的 `403 text/html` 已消失。当前首个稳定错误前移为：REALITY 握手完成伪装站 TLS 后，临时证书认证未通过，`verified=false`，随后返回 `REALITY: processed invalid connection`。因此 gRPC path 和 VLESS 尚未获得有效 REALITY underlay。
 
-补丁版 dae 可以正常启动，但 JP3 仍为 `ALIVE --tcp4/6-> NOT ALIVE`。因此 REALITY client version 假设已被实机否定，不再作为当前主要 root cause。
+早期独立 `1.8.10 -> 26.3.27` 构建虽未修复 JP3，但当时 gRPC 分支没有调用 REALITY；修改后的版本字节从未进入 JP3 ClientHello。该实验不能排除服务端 `minClientVer`，需要在第一阶段 transport fix 上重新进行有效 A/B。
+
+## JP3 REALITY admission diagnostic build
+
+新诊断构建保留第一阶段 REALITY + gRPC 修复，并把默认 REALITY client version 改为 `26.3.27`。仅对 JP3，可通过环境变量选择旧版本对照：
+
+```text
+DAE_JP3_REALITY_PROBE_VERSION=1.8.10
+```
+
+允许值仅为 `1.8.10` 和 `26.3.27`；未设置时使用默认 `26.3.27`。非 JP3 节点忽略 probe override。
+
+目标限定日志增加：attempt ID、实际 peer（底层可见时）、public key 和 shortId 的解码长度、客户端 UTC 时间、认证 key-share 类型及 wire key 一致性、AEAD 类型、最终 ClientHello wire self-check、peer certificate 分类、REALITY admission 结果，以及不会把 `CONNECTING`/`TRANSIENT_FAILURE` 误称为成功的 gRPC 状态。日志不包含认证值、UUID、完整 URI 或 key hash。
+
+运行时 wire self-check 会在发送前按服务端方式对 SessionId ciphertext、nonce 和清零后的 ClientHello AAD 做反向验证；单元测试另用随机合成参数验证 Chrome wire X25519 对应关系和 AEAD round-trip。该检查能发现客户端构造错误，但不能推导服务端 private key、shortId、SNI、版本门槛或时间策略。
+
+- workflow：`.github/workflows/build-jp3-reality-admission-diag.yml`
+- patch：`patches/jp3-reality-admission-diag-2.patch`
+- release tag：`jp3-reality-admission-diag-2`
+- binary/artifact：`dae-jp3-reality-admission-diag-arm64`
+
+除默认 REALITY version 及显式 JP3 probe override 外，timeout、retry、DNS、routing、health check、VLESS header、serviceName、path 和无关协议保持不变。
 
 ## JP3 REALITY gRPC fix build
 
@@ -80,4 +101,4 @@ Workflow：`.github/workflows/build-dae-reality-test.yml`
 
 ## 结论边界
 
-26.3.27 实验已失败，不能解释 JP3 问题。diagnostic build 的编译成功也不证明 root cause；需由 OpenWrt 实机 `[JP3DIAG]` 日志确认实际失败位置。
+早期 26.3.27 实验没有进入 REALITY，不能用于接受或排除版本门槛。第一阶段 transport fix 已经实机确认；当前边界是 REALITY admission 被拒绝。新 admission diagnostic 的编译、wire self-check 和 ARM64 CI 成功仍不能证明服务端接受认证；需比较默认 26.3.27 与显式 1.8.10 对照日志，并结合相同节点的 Xray/sing-box 控制实验或服务端安全日志判断 key、shortId、SNI、时间、版本和实际 backend。
