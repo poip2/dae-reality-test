@@ -1,4 +1,4 @@
-# dae REALITY 26.3.27 单变量测试构建
+# dae JP3 REALITY / gRPC 实验构建
 
 非官方、实验性 dae 构建。不是 dae 官方 release，不建议作为常规升级包使用。
 
@@ -7,6 +7,26 @@
 `REALITY client version 1.8.10 -> 26.3.27`：**FAILED TO FIX JP3**。
 
 补丁版 dae 可以正常启动，但 JP3 仍为 `ALIVE --tcp4/6-> NOT ALIVE`。因此 REALITY client version 假设已被实机否定，不再作为当前主要 root cause。
+
+## JP3 REALITY gRPC fix build
+
+diagnostic 实机证据显示：`security=reality + type=grpc` 被解析，但 effective outbound 的 gRPC construction 没有构造 REALITY underlay。grpc-go 改用普通 `crypto/tls`，服务端随后返回 `HTTP 403` 和 `Content-Type: text/html`；该 HTTP 状态再被 grpc-go 映射为 `PermissionDenied`。VLESS response header error 是后续结果，不是首个错误。
+
+修复构建把链路改为：
+
+```text
+VLESS -> gRPC /update/Tun -> authenticated REALITY/uTLS (ALPN h2) -> TCP
+```
+
+实现同时阻止 grpc-go 在已经完成 REALITY 的连接外再增加第二层 TLS，并隔离 pre-secured gRPC ClientConn cache。REALITY version 保持 `1.8.10`；serviceName、gRPC path、VLESS header、timeout、retry、DNS、routing、health check 和依赖版本不变。
+
+- workflow：`.github/workflows/build-jp3-reality-grpc-fix.yml`
+- patch：`patches/jp3-reality-grpc-fix-1.patch`
+- release tag：`jp3-reality-grpc-fix-1`
+- binary/artifact：`dae-jp3-reality-grpc-fix-arm64`
+- expected proof：`handshake_success verified=true alpn="h2"`，随后 `response_header_ok`
+
+该版本在 OpenWrt 实机通过前仍是 prerelease；源码调用链、单元测试和 ARM64 CI 成功不能代替 JP3 正对照。
 
 ## JP3 diagnostic build
 

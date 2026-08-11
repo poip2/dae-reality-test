@@ -1,0 +1,564 @@
+diff --git a/dialer/v2ray/v2ray.go b/dialer/v2ray/v2ray.go
+index 3083918..9376a8b 100644
+--- a/dialer/v2ray/v2ray.go
++++ b/dialer/v2ray/v2ray.go
+@@ -163,0 +164,21 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
++		presecured := false
++		if s.TLS == "reality" {
++			u := url.URL{
++				Scheme: "reality",
++				Host:   net.JoinHostPort(s.Add, s.Port),
++				RawQuery: url.Values{
++					"sni": []string{sni},
++					"fp":  []string{s.Fingerprint},
++					"sid": []string{s.ShortId},
++					"pbk": []string{s.PublicKey},
++					"spx": []string{s.SpiderX},
++				}.Encode(),
++			}
++			realityDialer, err := tls.NewReality(u.String(), d)
++			if err != nil {
++				return nil, nil, err
++			}
++			realityDialer.SetNextProtos([]string{"h2"})
++			d = realityDialer
++			presecured = true
++		}
+@@ -168,0 +190 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
++			Presecured:    presecured,
+diff --git a/dialer/v2ray/v2ray_test.go b/dialer/v2ray/v2ray_test.go
+new file mode 100644
+index 0000000..45dcdcd
+--- /dev/null
++++ b/dialer/v2ray/v2ray_test.go
+@@ -0,0 +1,76 @@
++package v2ray
++
++import (
++	"context"
++	"crypto/ecdh"
++	"crypto/rand"
++	"encoding/base64"
++	"encoding/hex"
++	"errors"
++	"testing"
++
++	"github.com/daeuniverse/outbound/dialer"
++	"github.com/daeuniverse/outbound/netproxy"
++	_ "github.com/daeuniverse/outbound/protocol/vless"
++	transportgrpc "github.com/daeuniverse/outbound/transport/grpc"
++	outboundtls "github.com/daeuniverse/outbound/transport/tls"
++)
++
++type constructionTestDialer struct{}
++
++func (constructionTestDialer) DialContext(context.Context, string, string) (netproxy.Conn, error) {
++	return nil, errors.New("unexpected dial")
++}
++
++func randomHex(t *testing.T, size int) string {
++	t.Helper()
++	value := make([]byte, size)
++	if _, err := rand.Read(value); err != nil {
++		t.Fatalf("generate random test value: %v", err)
++	}
++	return hex.EncodeToString(value)
++}
++
++func TestVLESSRealityGRPCConstructionIncludesRealityUnderlay(t *testing.T) {
++	privateKey, err := ecdh.X25519().GenerateKey(rand.Reader)
++	if err != nil {
++		t.Fatalf("generate test key: %v", err)
++	}
++	base := constructionTestDialer{}
++	node := &V2Ray{
++		Add:         "127.0.0.1",
++		Port:        "443",
++		ID:          randomHex(t, 16),
++		Net:         "grpc",
++		SNI:         "example.com",
++		Path:        "service",
++		TLS:         "reality",
++		Fingerprint: "chrome",
++		PublicKey:   base64.RawURLEncoding.EncodeToString(privateKey.PublicKey().Bytes()),
++		ShortId:     randomHex(t, 8),
++		Protocol:    "vless",
++	}
++
++	result, _, err := node.Dialer(&dialer.ExtraOption{}, base)
++	if err != nil {
++		t.Fatalf("construct dialer: %v", err)
++	}
++	vlessLayer, ok := result.(netproxy.DialerUnwrapper)
++	if !ok {
++		t.Fatalf("outer dialer does not expose underlay: %T", result)
++	}
++	grpcLayer, ok := vlessLayer.UnwrapDialer().(*transportgrpc.Dialer)
++	if !ok {
++		t.Fatalf("VLESS underlay is not gRPC: %T", vlessLayer.UnwrapDialer())
++	}
++	if !grpcLayer.Presecured {
++		t.Fatal("REALITY gRPC underlay is not marked pre-secured")
++	}
++	realityLayer, ok := grpcLayer.NextDialer.(*outboundtls.Reality)
++	if !ok {
++		t.Fatalf("gRPC context dialer is not REALITY: %T", grpcLayer.NextDialer)
++	}
++	if realityLayer.UnwrapDialer() != base {
++		t.Fatalf("REALITY underlay changed: %T", realityLayer.UnwrapDialer())
++	}
++}
+diff --git a/pkg/jp3diag/jp3diag.go b/pkg/jp3diag/jp3diag.go
+new file mode 100644
+index 0000000..9b3ac32
+--- /dev/null
++++ b/pkg/jp3diag/jp3diag.go
+@@ -0,0 +1,44 @@
++package jp3diag
++
++import (
++	"net"
++	"strings"
++
++	"github.com/daeuniverse/outbound/pkg/logger"
++)
++
++const (
++	targetHostname = "jp3-r.link-t7.com"
++	targetIPv4     = "13.231.27.232"
++	targetPort     = "10033"
++)
++
++// IsTarget limits diagnostic output to the JP3 proxy endpoint. It never
++// resolves names or changes dialing behavior.
++func IsTarget(address string) bool {
++	host, port, err := net.SplitHostPort(address)
++	if err != nil || port != targetPort {
++		return false
++	}
++	host = strings.TrimSuffix(host, ".")
++	return strings.EqualFold(host, targetHostname) || host == targetIPv4
++}
++
++// EnabledForConn propagates the target-only diagnostic guard through transport
++// wrappers without inspecting payload or authentication data.
++func EnabledForConn(conn any) bool {
++	type diagnosticConn interface {
++		JP3Diagnostic() bool
++	}
++	diagnostic, ok := conn.(diagnosticConn)
++	return ok && diagnostic.JP3Diagnostic()
++}
++
++// Printf writes through outbound's existing logger, which dae directs to its
++// normal stderr/procd logging path.
++func Printf(stage, format string, args ...any) {
++	all := make([]any, 0, len(args)+1)
++	all = append(all, stage)
++	all = append(all, args...)
++	logger.Logger.Printf("[JP3DIAG][%s] "+format, all...)
++}
+diff --git a/protocol/vless/conn.go b/protocol/vless/conn.go
+index 3f742cc..c7650fc 100644
+--- a/protocol/vless/conn.go
++++ b/protocol/vless/conn.go
+@@ -17,0 +18 @@ import (
++	"github.com/daeuniverse/outbound/pkg/jp3diag"
+@@ -42,0 +44 @@ type Conn struct {
++	diagnostic bool
+@@ -53,3 +55,4 @@ func NewConn(conn netproxy.Conn, metadata Metadata, cmdKey []byte) (c *Conn, err
+-		Conn:     conn,
+-		metadata: metadata,
+-		cmdKey:   key,
++		Conn:       conn,
++		metadata:   metadata,
++		cmdKey:     key,
++		diagnostic: jp3diag.EnabledForConn(conn),
+@@ -142 +145,5 @@ func (c *Conn) write(b []byte) (n int, err error) {
+-				return 0, fmt.Errorf("write header: %w", err)
++				err = fmt.Errorf("write header: %w", err)
++				if c.diagnostic {
++					jp3diag.Printf("VLESS", "request_header_error error_type=%T error=%q", err, err)
++				}
++				return 0, err
+@@ -144,0 +152,3 @@ func (c *Conn) write(b []byte) (n int, err error) {
++			if c.diagnostic {
++				jp3diag.Printf("VLESS", "request_header_written")
++			}
+@@ -177,0 +188,3 @@ func (c *Conn) read(b []byte) (n int, err error) {
++				if c.diagnostic {
++					jp3diag.Printf("VLESS", "response_header_error error_type=%T error=%q", err, err)
++				}
+@@ -179,0 +193,3 @@ func (c *Conn) read(b []byte) (n int, err error) {
++			if c.diagnostic {
++				jp3diag.Printf("VLESS", "response_header_ok")
++			}
+diff --git a/transport/grpc/grpc_client.go b/transport/grpc/grpc_client.go
+index a4fcc82..d1e8e3d 100644
+--- a/transport/grpc/grpc_client.go
++++ b/transport/grpc/grpc_client.go
+@@ -5,0 +6 @@ import (
++	"crypto/x509"
+@@ -16,0 +18 @@ import (
++	"github.com/daeuniverse/outbound/pkg/jp3diag"
+@@ -22,0 +25 @@ import (
++	"google.golang.org/grpc/credentials/insecure"
+@@ -37,2 +40,2 @@ var (
+-func grpcClientCacheKey(scope, serverName, address string, allowInsecure bool, somark uint32, mptcp bool) string {
+-	return fmt.Sprintf("%s\x00%s\x00%s\x00%t\x00%d\x00%t", scope, serverName, address, allowInsecure, somark, mptcp)
++func grpcClientCacheKey(scope, serverName, address string, allowInsecure bool, somark uint32, mptcp, presecured bool, transportIdentity string) string {
++	return fmt.Sprintf("%s\x00%s\x00%s\x00%t\x00%d\x00%t\x00%t\x00%s", scope, serverName, address, allowInsecure, somark, mptcp, presecured, transportIdentity)
+@@ -105,0 +109,4 @@ type ClientConn struct {
++
++	diagnostic       bool
++	recvErrorLogOnce sync.Once
++	sendErrorLogOnce sync.Once
+@@ -108 +115 @@ type ClientConn struct {
+-func NewClientConn(tun proto.GunService_TunClient, closer context.CancelFunc) *ClientConn {
++func NewClientConn(tun proto.GunService_TunClient, closer context.CancelFunc, diagnostic bool) *ClientConn {
+@@ -120,0 +128,11 @@ func NewClientConn(tun proto.GunService_TunClient, closer context.CancelFunc) *C
++		diagnostic:  diagnostic,
++	}
++}
++
++func (c *ClientConn) JP3Diagnostic() bool {
++	return c.diagnostic
++}
++
++func (c *ClientConn) logRecvError(err error) {
++	if !c.diagnostic || err == nil {
++		return
+@@ -121,0 +140,12 @@ func NewClientConn(tun proto.GunService_TunClient, closer context.CancelFunc) *C
++	c.recvErrorLogOnce.Do(func() {
++		jp3diag.Printf("GRPC", "recv_error code=%s error_type=%T error=%q", status.Code(err), err, err)
++	})
++}
++
++func (c *ClientConn) logSendError(err error) {
++	if !c.diagnostic || err == nil {
++		return
++	}
++	c.sendErrorLogOnce.Do(func() {
++		jp3diag.Printf("GRPC", "send_error code=%s error_type=%T error=%q", status.Code(err), err, err)
++	})
+@@ -132,0 +163 @@ func (c *ClientConn) Read(p []byte) (n int, err error) {
++		c.logRecvError(os.ErrDeadlineExceeded)
+@@ -134,0 +166 @@ func (c *ClientConn) Read(p []byte) (n int, err error) {
++		c.logRecvError(io.EOF)
+@@ -165,0 +198 @@ func (c *ClientConn) Read(p []byte) (n int, err error) {
++		c.logRecvError(os.ErrDeadlineExceeded)
+@@ -167,0 +201 @@ func (c *ClientConn) Read(p []byte) (n int, err error) {
++		c.logRecvError(io.EOF)
+@@ -171,0 +206 @@ func (c *ClientConn) Read(p []byte) (n int, err error) {
++			c.logRecvError(err)
+@@ -187,0 +223 @@ func (c *ClientConn) Write(p []byte) (n int, err error) {
++		c.logSendError(os.ErrDeadlineExceeded)
+@@ -189,0 +226 @@ func (c *ClientConn) Write(p []byte) (n int, err error) {
++		c.logSendError(io.EOF)
+@@ -208,0 +246 @@ func (c *ClientConn) Write(p []byte) (n int, err error) {
++		c.logSendError(os.ErrDeadlineExceeded)
+@@ -210,0 +249 @@ func (c *ClientConn) Write(p []byte) (n int, err error) {
++		c.logSendError(io.EOF)
+@@ -212,0 +252 @@ func (c *ClientConn) Write(p []byte) (n int, err error) {
++		c.logSendError(err)
+@@ -358,0 +399 @@ type Dialer struct {
++	Presecured    bool
+@@ -370 +411,17 @@ func (d *Dialer) DialContext(ctx context.Context, network string, address string
+-	meta, cancel, err := getGrpcClientConn(ctx, d.NextDialer, d.ServerName, address, d.AllowInsecure, magicNetwork.Mark, magicNetwork.Mptcp)
++	serviceName := d.ServiceName
++	if serviceName == "" {
++		serviceName = "GunService"
++	}
++	diagnostic := jp3diag.IsTarget(address)
++	tlsImplementation := "crypto/tls via grpc-go"
++	if d.Presecured {
++		tlsImplementation = "REALITY/uTLS via context dialer"
++	}
++	if diagnostic {
++		jp3diag.Printf("GRPC", "clientconn_start remote=%q sni=%q serviceName=%q tls_implementation=%q", address, d.ServerName, serviceName, tlsImplementation)
++	}
++	transportIdentity := ""
++	if d.Presecured {
++		transportIdentity = fmt.Sprintf("%p", d)
++	}
++	meta, cancel, err := getGrpcClientConn(ctx, d.NextDialer, d.ServerName, address, d.AllowInsecure, magicNetwork.Mark, magicNetwork.Mptcp, d.Presecured, transportIdentity)
+@@ -372,0 +430,3 @@ func (d *Dialer) DialContext(ctx context.Context, network string, address string
++		if diagnostic {
++			jp3diag.Printf("GRPC", "clientconn_error code=%s error_type=%T error=%q", status.Code(err), err, err)
++		}
+@@ -374,0 +435,3 @@ func (d *Dialer) DialContext(ctx context.Context, network string, address string
++	if diagnostic {
++		jp3diag.Printf("GRPC", "clientconn_success state=%s", meta.cc.GetState())
++	}
+@@ -378,3 +441,3 @@ func (d *Dialer) DialContext(ctx context.Context, network string, address string
+-	serviceName := d.ServiceName
+-	if serviceName == "" {
+-		serviceName = "GunService"
++	path := "/" + serviceName + "/Tun"
++	if diagnostic {
++		jp3diag.Printf("GRPC", "tun_start serviceName=%q path=%q", serviceName, path)
+@@ -386,0 +450,3 @@ func (d *Dialer) DialContext(ctx context.Context, network string, address string
++		if diagnostic {
++			jp3diag.Printf("GRPC", "tun_error code=%s error_type=%T error=%q", status.Code(err), err, err)
++		}
+@@ -389 +455,4 @@ func (d *Dialer) DialContext(ctx context.Context, network string, address string
+-	return NewClientConn(tun, streamCloser), nil
++	if diagnostic {
++		jp3diag.Printf("GRPC", "tun_success path=%q", path)
++	}
++	return NewClientConn(tun, streamCloser, diagnostic), nil
+@@ -392 +461 @@ func (d *Dialer) DialContext(ctx context.Context, network string, address string
+-func getGrpcClientConn(ctx context.Context, tcpDialer netproxy.Dialer, serverName string, address string, allowInsecure bool, somark uint32, mptcp bool) (*clientConnMeta, ccCanceller, error) {
++func getGrpcClientConn(ctx context.Context, tcpDialer netproxy.Dialer, serverName string, address string, allowInsecure bool, somark uint32, mptcp, presecured bool, transportIdentity string) (*clientConnMeta, ccCanceller, error) {
+@@ -394,5 +463,20 @@ func getGrpcClientConn(ctx context.Context, tcpDialer netproxy.Dialer, serverNam
+-	cacheKey := grpcClientCacheKey(scope, serverName, address, allowInsecure, somark, mptcp)
+-	// allowInsecure?
+-	roots, err := cert.GetSystemCertPool()
+-	if err != nil {
+-		return nil, func() {}, fmt.Errorf("failed to get system certificate pool")
++	// A pre-secured dialer owns connection authentication. Its caller-provided
++	// identity isolates the pooled ClientConn without putting authentication
++	// material in the cache key.
++	cacheKey := grpcClientCacheKey(scope, serverName, address, allowInsecure, somark, mptcp, presecured, transportIdentity)
++
++	var (
++		certOption grpc.DialOption
++		err        error
++	)
++	if presecured {
++		// The context dialer returns an authenticated encrypted connection.
++		// insecure credentials prevent grpc-go from adding a second TLS layer.
++		certOption = grpc.WithTransportCredentials(insecure.NewCredentials())
++	} else {
++		var roots *x509.CertPool
++		roots, err = cert.GetSystemCertPool()
++		if err != nil {
++			return nil, func() {}, fmt.Errorf("failed to get system certificate pool")
++		}
++		certOption = grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{ServerName: serverName, RootCAs: roots, InsecureSkipVerify: allowInsecure}))
+@@ -400 +483,0 @@ func getGrpcClientConn(ctx context.Context, tcpDialer netproxy.Dialer, serverNam
+-	certOption := grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{ServerName: serverName, RootCAs: roots, InsecureSkipVerify: allowInsecure}))
+diff --git a/transport/grpc/grpc_client_test.go b/transport/grpc/grpc_client_test.go
+index c4b76c2..961e904 100644
+--- a/transport/grpc/grpc_client_test.go
++++ b/transport/grpc/grpc_client_test.go
+@@ -8,0 +9 @@ import (
++	"github.com/daeuniverse/outbound/netproxy"
+@@ -97,2 +98,2 @@ func TestCleanScopedClientConnectionCacheOnlyClosesMatchingScope(t *testing.T) {
+-		grpcClientCacheKey("scope-a", "", listener1.Addr().String(), false, 0, false): {cc: cc1},
+-		grpcClientCacheKey("scope-b", "", listener2.Addr().String(), false, 0, false): {cc: cc2},
++		grpcClientCacheKey("scope-a", "", listener1.Addr().String(), false, 0, false, false, ""): {cc: cc1},
++		grpcClientCacheKey("scope-b", "", listener2.Addr().String(), false, 0, false, false, ""): {cc: cc2},
+@@ -109,0 +111,55 @@ func TestCleanScopedClientConnectionCacheOnlyClosesMatchingScope(t *testing.T) {
++type directTestDialer struct{}
++
++func (directTestDialer) DialContext(ctx context.Context, _ string, address string) (netproxy.Conn, error) {
++	return (&net.Dialer{}).DialContext(ctx, "tcp", address)
++}
++
++func TestPresecuredClientConnDoesNotAddSecondTLSLayer(t *testing.T) {
++	globalCCAccess.Lock()
++	original := globalCCMap
++	globalCCMap = nil
++	globalCCAccess.Unlock()
++	t.Cleanup(func() {
++		CleanGlobalClientConnectionCache()
++		globalCCAccess.Lock()
++		globalCCMap = original
++		globalCCAccess.Unlock()
++	})
++
++	listener, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatalf("listen: %v", err)
++	}
++	defer func() { _ = listener.Close() }()
++	server := grpcpkg.NewServer()
++	defer server.Stop()
++	go func() { _ = server.Serve(listener) }()
++
++	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
++	defer cancel()
++	meta, remove, err := getGrpcClientConn(ctx, directTestDialer{}, "", listener.Addr().String(), false, 0, false, true, "test-presecured")
++	if err != nil {
++		t.Fatalf("getGrpcClientConn: %v", err)
++	}
++	defer remove()
++	meta.cc.Connect()
++	for {
++		state := meta.cc.GetState()
++		if state == connectivity.Ready {
++			break
++		}
++		if !meta.cc.WaitForStateChange(ctx, state) {
++			t.Fatalf("client conn did not become ready: state=%v error=%v", state, ctx.Err())
++		}
++	}
++}
++
++func TestPresecuredCacheKeyIsolatedByTransportIdentity(t *testing.T) {
++	standard := grpcClientCacheKey("scope", "server", "address", false, 0, false, false, "")
++	first := grpcClientCacheKey("scope", "server", "address", false, 0, false, true, "first")
++	second := grpcClientCacheKey("scope", "server", "address", false, 0, false, true, "second")
++	if standard == first || first == second {
++		t.Fatal("security configurations share a gRPC ClientConn cache key")
++	}
++}
++
+diff --git a/transport/tls/reality.go b/transport/tls/reality.go
+index 7481a5b..aa77b3e 100644
+--- a/transport/tls/reality.go
++++ b/transport/tls/reality.go
+@@ -36,0 +37 @@ import (
++	"github.com/daeuniverse/outbound/pkg/jp3diag"
+@@ -137,0 +139 @@ type Reality struct {
++	nextProtos  []string
+@@ -161,0 +164,35 @@ func (x *Reality) UnwrapDialer() netproxy.Dialer {
++// SetNextProtos configures and requires application protocols for the REALITY
++// handshake. The slice is copied so callers cannot mutate live configuration.
++func (x *Reality) SetNextProtos(nextProtos []string) {
++	x.nextProtos = append(x.nextProtos[:0], nextProtos...)
++}
++
++func applyRealityNextProtos(uConn *utls.UConn, nextProtos []string) error {
++	if len(nextProtos) == 0 {
++		return nil
++	}
++	for _, extension := range uConn.Extensions {
++		alpn, ok := extension.(*utls.ALPNExtension)
++		if !ok {
++			continue
++		}
++		alpn.AlpnProtocols = append(alpn.AlpnProtocols[:0], nextProtos...)
++		// Re-apply extensions and marshal Hello.Raw before REALITY authenticates
++		// the complete ClientHello as AEAD associated data.
++		return uConn.BuildHandshakeState()
++	}
++	return errors.New("REALITY: selected fingerprint has no ALPN extension")
++}
++
++func realityNegotiatedNextProto(negotiated string, nextProtos []string) bool {
++	if len(nextProtos) == 0 {
++		return true
++	}
++	for _, nextProto := range nextProtos {
++		if negotiated == nextProto {
++			return true
++		}
++	}
++	return false
++}
++
+@@ -241,0 +279 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++	diagnostic := jp3diag.IsTarget(addr)
+@@ -247 +285,5 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
+-			return nil, fmt.Errorf("[REALITY]: dial to %s: %w", addr, err)
++			err = fmt.Errorf("[REALITY]: dial to %s: %w", addr, err)
++			if diagnostic {
++				jp3diag.Printf("REALITY", "handshake_error phase=transport_dial remote=%q error_type=%T error=%q", addr, err, err)
++			}
++			return nil, err
+@@ -259,0 +302,3 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++		if diagnostic {
++			jp3diag.Printf("REALITY", "handshake_start remote=%q sni=%q tls_implementation=%q fingerprint=%q alpn_config_override=%q retry=%d", addr, uConn.ServerName, "uTLS", x.fingerprint.Client, x.nextProtos, retry)
++		}
+@@ -267,0 +313,9 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++				if diagnostic {
++					jp3diag.Printf("REALITY", "handshake_error phase=build_state error_type=%T error=%q", err, err)
++				}
++				return nil, err
++			}
++			if err = applyRealityNextProtos(uConn.UConn, x.nextProtos); err != nil {
++				if diagnostic {
++					jp3diag.Printf("REALITY", "handshake_error phase=alpn_config error_type=%T error=%q", err, err)
++				}
+@@ -286 +340,5 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
+-					return nil, errors.New("nil ecdheKey")
++					err = errors.New("nil ecdheKey")
++					if diagnostic {
++						jp3diag.Printf("REALITY", "handshake_error phase=key_share error_type=%T error=%q", err, err)
++					}
++					return nil, err
+@@ -294 +352,5 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
+-				return nil, errors.New("REALITY: SharedKey == nil")
++				err = errors.New("REALITY: SharedKey == nil")
++				if diagnostic {
++					jp3diag.Printf("REALITY", "handshake_error phase=key_agreement error_type=%T error=%q", err, err)
++				}
++				return nil, err
+@@ -296,0 +359,3 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++				if diagnostic {
++					jp3diag.Printf("REALITY", "handshake_error phase=key_derivation error_type=%T error=%q", err, err)
++				}
+@@ -313,0 +379,3 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++			if diagnostic {
++				jp3diag.Printf("REALITY", "handshake_error phase=utls error_type=%T error=%q", err, err)
++			}
+@@ -319,0 +388 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++		state := uConn.ConnectionState()
+@@ -320,0 +390,3 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++			if diagnostic {
++				jp3diag.Printf("REALITY", "handshake_error phase=reality_verification verified=false alpn=%q error=%q", state.NegotiatedProtocol, "REALITY: processed invalid connection")
++			}
+@@ -408,0 +481,11 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++		if !realityNegotiatedNextProto(state.NegotiatedProtocol, x.nextProtos) {
++			err = fmt.Errorf("REALITY: unexpected negotiated ALPN %q", state.NegotiatedProtocol)
++			if diagnostic {
++				jp3diag.Printf("REALITY", "handshake_error phase=alpn_negotiation verified=true alpn=%q error_type=%T error=%q", state.NegotiatedProtocol, err, err)
++			}
++			_ = uConn.Close()
++			return nil, err
++		}
++		if diagnostic {
++			jp3diag.Printf("REALITY", "handshake_success verified=true alpn=%q", state.NegotiatedProtocol)
++		}
+diff --git a/transport/tls/reality_test.go b/transport/tls/reality_test.go
+index 656b754..64c3c99 100644
+--- a/transport/tls/reality_test.go
++++ b/transport/tls/reality_test.go
+@@ -99,0 +100,45 @@ func TestRealityVerifyPeerCertificateRejectsUnavailablePeerCertificates(t *testi
++
++func TestRealitySetNextProtosCopiesInput(t *testing.T) {
++	reality := &Reality{}
++	nextProtos := []string{"h2"}
++	reality.SetNextProtos(nextProtos)
++	nextProtos[0] = "mutated"
++	if len(reality.nextProtos) != 1 || reality.nextProtos[0] != "h2" {
++		t.Fatalf("unexpected stored protocols: %#v", reality.nextProtos)
++	}
++}
++
++func TestApplyRealityNextProtosUpdatesClientHello(t *testing.T) {
++	client, server := net.Pipe()
++	defer func() { _ = client.Close() }()
++	defer func() { _ = server.Close() }()
++
++	uConn := utls.UClient(client, &utls.Config{InsecureSkipVerify: true}, utls.HelloChrome_Auto)
++	if err := uConn.BuildHandshakeState(); err != nil {
++		t.Fatalf("BuildHandshakeState: %v", err)
++	}
++	if err := applyRealityNextProtos(uConn, []string{"h2"}); err != nil {
++		t.Fatalf("applyRealityNextProtos: %v", err)
++	}
++	if got := uConn.HandshakeState.Hello.AlpnProtocols; len(got) != 1 || got[0] != "h2" {
++		t.Fatalf("unexpected ClientHello ALPN: %#v", got)
++	}
++	for _, extension := range uConn.Extensions {
++		if alpn, ok := extension.(*utls.ALPNExtension); ok {
++			if len(alpn.AlpnProtocols) != 1 || alpn.AlpnProtocols[0] != "h2" {
++				t.Fatalf("unexpected ALPN extension: %#v", alpn.AlpnProtocols)
++			}
++			return
++		}
++	}
++	t.Fatal("Chrome fingerprint has no ALPN extension")
++}
++
++func TestRealityNegotiatedNextProto(t *testing.T) {
++	if !realityNegotiatedNextProto("h2", []string{"h2"}) {
++		t.Fatal("expected h2 to be accepted")
++	}
++	if realityNegotiatedNextProto("http/1.1", []string{"h2"}) {
++		t.Fatal("unexpected protocol accepted")
++	}
++}
