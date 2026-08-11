@@ -8,6 +8,23 @@
 
 早期独立 `1.8.10 -> 26.3.27` 构建虽未修复 JP3，但当时 gRPC 分支没有调用 REALITY；修改后的版本字节从未进入 JP3 ClientHello。该实验不能排除服务端 `minClientVer`，需要在第一阶段 transport fix 上重新进行有效 A/B。
 
+## JP3 sing-box REALITY version probe build
+
+实机 A/B 已确认 `26.3.27` 与 `1.8.10` 都能生成内部自洽的 X25519/AES-GCM ClientHello，但服务端均返回可信 public-PKI fallback。相同 JP3 节点通过 sing-box 可正常使用；sing-box `v1.10` 至 `v1.13` 及当前 testing 的 REALITY client 都把 SessionId version 固定为 `1.8.1`。因此前一轮 `1.8.10` 并非 sing-box 等价控制，服务端 `maxClientVer=1.8.1` 仍是可验证假设。
+
+新构建只增加 JP3 `1.8.1` probe；默认仍为 `26.3.27`。使用：
+
+```text
+DAE_JP3_REALITY_PROBE_VERSION=1.8.1
+```
+
+允许值为 `1.8.1`、`1.8.10` 和 `26.3.27`；其他值报错。除三个 REALITY version bytes 外，ClientHello 构造、fingerprint、SNI、public key、shortId、ALPN、gRPC、VLESS、timeout、retry、DNS、routing、health check、serviceName、path 和无关协议均不变。
+
+- workflow：`.github/workflows/build-jp3-reality-singbox-version-probe.yml`
+- patch：`patches/jp3-reality-singbox-version-probe-3.patch`
+- release tag：`jp3-reality-singbox-version-probe-3`
+- binary/artifact：`dae-jp3-reality-singbox-version-probe-arm64`
+
 ## JP3 REALITY admission diagnostic build
 
 新诊断构建保留第一阶段 REALITY + gRPC 修复，并把默认 REALITY client version 改为 `26.3.27`。仅对 JP3，可通过环境变量选择旧版本对照：
