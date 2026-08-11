@@ -1,5 +1,5 @@
 diff --git a/transport/tls/reality.go b/transport/tls/reality.go
-index 2796aac..a19da0d 100644
+index 7481a5b..e2e54c8 100644
 --- a/transport/tls/reality.go
 +++ b/transport/tls/reality.go
 @@ -43,5 +43,5 @@ import (

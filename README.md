@@ -5,11 +5,12 @@
 ## 锁定基线
 
 - dae: `5a51cc747ef9e17185d438dc54ebf32c681984db`
-- outbound: `cc1a217490f9725953dce65f703b0c2f12dd8b2f`
-- outbound module version: `v0.0.0-sticky-ip.0.20260401154811-cc1a217490f9`
+- 有效 outbound：`github.com/olicesx/outbound@52c26f8e759e156d2f5ec97d18590febf74ba8bb`
+- 有效 outbound module version：`v0.0.0-sticky-ip.0.20260518034804-52c26f8e759e`
+- dae `require` 中记录的版本：`v0.0.0-sticky-ip.0.20260401154811-cc1a217490f9`
 - target: `linux/arm64`，OpenWrt aarch64
 
-精确 dae commit 的 `go.mod` 直接要求上述 outbound module version；同一文件还带有指向 `github.com/olicesx/outbound` 的上游 `replace`。本构建不采用该替换目标，而把 `github.com/daeuniverse/outbound` 明确替换到本地检出的精确 `cc1a217...` commit。CI 日志会打印两个 checkout HEAD、临时 `go.mod` diff 和最终 `go version -m`。
+精确 dae commit 的 `go.mod` 虽直接 `require` `daeuniverse/outbound@cc1a217...`，但同一文件存在生效的 `replace`，实际构建源码是 `github.com/olicesx/outbound@52c26f8...`。直接强制使用 `cc1a217...` 会因缺少 dae 调用的两个 transport cache API 而无法编译。为保持相对于真实构建基线的单变量实验，本构建检出精确有效 commit `52c26f8...`，再用本地 module replacement 接入 patched checkout。CI 日志会打印两个 checkout HEAD、临时 `go.mod` diff 和最终 `go version -m`。
 
 ## 唯一计划中的 outbound 源码变化
 

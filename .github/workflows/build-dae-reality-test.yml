@@ -26,8 +26,9 @@ concurrency:
 
 env:
   DAE_COMMIT: 5a51cc747ef9e17185d438dc54ebf32c681984db
-  OUTBOUND_COMMIT: cc1a217490f9725953dce65f703b0c2f12dd8b2f
-  OUTBOUND_VERSION: v0.0.0-sticky-ip.0.20260401154811-cc1a217490f9
+  OUTBOUND_COMMIT: 52c26f8e759e156d2f5ec97d18590febf74ba8bb
+  OUTBOUND_VERSION: v0.0.0-sticky-ip.0.20260518034804-52c26f8e759e
+  OUTBOUND_REQUIRED_VERSION: v0.0.0-sticky-ip.0.20260401154811-cc1a217490f9
   BINARY_NAME: dae-reality-26.3.27-arm64
   BUILD_VERSION: 2026.06.14-5a51cc747ef9e17185d438dc54ebf32c681984db-reality-test-26.3.27
 
@@ -52,8 +53,8 @@ jobs:
       - name: Checkout exact outbound source
         uses: actions/checkout@v4
         with:
-          repository: daeuniverse/outbound
-          ref: cc1a217490f9725953dce65f703b0c2f12dd8b2f
+          repository: olicesx/outbound
+          ref: 52c26f8e759e156d2f5ec97d18590febf74ba8bb
           path: source/outbound
           fetch-depth: 1
 
@@ -64,8 +65,8 @@ jobs:
           test "$(git -C source/dae rev-parse HEAD)" = "$DAE_COMMIT"
           test "$(git -C source/outbound rev-parse HEAD)" = "$OUTBOUND_COMMIT"
           test "$(head -n 1 source/outbound/go.mod)" = "module github.com/daeuniverse/outbound"
-          grep -Fqx $'\tgithub.com/daeuniverse/outbound '"$OUTBOUND_VERSION" source/dae/go.mod
-          grep -Fqx 'replace github.com/daeuniverse/outbound => github.com/olicesx/outbound v0.0.0-sticky-ip.0.20260518034804-52c26f8e759e' source/dae/go.mod
+          grep -Fqx $'\tgithub.com/daeuniverse/outbound '"$OUTBOUND_REQUIRED_VERSION" source/dae/go.mod
+          grep -Fqx "replace github.com/daeuniverse/outbound => github.com/olicesx/outbound $OUTBOUND_VERSION" source/dae/go.mod
           echo "dae:      $(git -C source/dae rev-parse HEAD)"
           echo "outbound: $(git -C source/outbound rev-parse HEAD)"
 
@@ -105,7 +106,7 @@ jobs:
           set -euo pipefail
           go mod edit -replace=github.com/daeuniverse/outbound="$GITHUB_WORKSPACE/source/outbound"
           grep -Fqx "replace github.com/daeuniverse/outbound => $GITHUB_WORKSPACE/source/outbound" go.mod
-          grep -Fqx $'\tgithub.com/daeuniverse/outbound '"$OUTBOUND_VERSION" go.mod
+          grep -Fqx $'\tgithub.com/daeuniverse/outbound '"$OUTBOUND_REQUIRED_VERSION" go.mod
           test "$(git diff --name-only)" = "go.mod"
           git diff --check
           git diff -- go.mod
@@ -197,7 +198,7 @@ jobs:
           generate_release_notes: false
           body: |
             Experimental, unofficial dae build for one-variable REALITY compatibility testing.
-            Baselines: dae 5a51cc747ef9e17185d438dc54ebf32c681984db; outbound cc1a217490f9725953dce65f703b0c2f12dd8b2f.
+            Effective baselines: dae 5a51cc747ef9e17185d438dc54ebf32c681984db; olicesx/outbound 52c26f8e759e156d2f5ec97d18590febf74ba8bb.
             Only outbound source change: REALITY client version bytes 1.8.10 -> 26.3.27.
             Build success does not establish root cause.
           files: |
