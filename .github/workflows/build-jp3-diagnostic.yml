@@ -1,0 +1,252 @@
+name: Build JP3 diagnostic dae
+run-name: Build JP3 diagnostic dae (${{ github.event_name }})
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-jp3-diagnostic.yml"
+      - "patches/jp3-diagnostic-1.patch"
+      - "scripts/verify-reality-version.sh"
+      - "README.md"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: GitHub Release tag
+        required: true
+        default: jp3-diagnostic-1
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: jp3-diagnostic-1-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DAE_COMMIT: 5a51cc747ef9e17185d438dc54ebf32c681984db
+  OUTBOUND_COMMIT: 52c26f8e759e156d2f5ec97d18590febf74ba8bb
+  OUTBOUND_VERSION: v0.0.0-sticky-ip.0.20260518034804-52c26f8e759e
+  OUTBOUND_REQUIRED_VERSION: v0.0.0-sticky-ip.0.20260401154811-cc1a217490f9
+  BINARY_NAME: dae-jp3-diagnostic-arm64
+  BUILD_VERSION: 2026.06.14-5a51cc747ef9e17185d438dc54ebf32c681984db-jp3-diagnostic-1
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout wrapper repository
+        uses: actions/checkout@v4
+
+      - name: Checkout exact dae source
+        uses: actions/checkout@v4
+        with:
+          repository: daeuniverse/dae
+          ref: 5a51cc747ef9e17185d438dc54ebf32c681984db
+          path: source/dae
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Checkout exact effective outbound source
+        uses: actions/checkout@v4
+        with:
+          repository: olicesx/outbound
+          ref: 52c26f8e759e156d2f5ec97d18590febf74ba8bb
+          path: source/outbound
+          fetch-depth: 1
+
+      - name: Verify immutable clean baselines
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C source/dae rev-parse HEAD)" = "$DAE_COMMIT"
+          test "$(git -C source/outbound rev-parse HEAD)" = "$OUTBOUND_COMMIT"
+          test "$(head -n 1 source/outbound/go.mod)" = "module github.com/daeuniverse/outbound"
+          grep -Fqx $'\tgithub.com/daeuniverse/outbound '"$OUTBOUND_REQUIRED_VERSION" source/dae/go.mod
+          grep -Fqx "replace github.com/daeuniverse/outbound => github.com/olicesx/outbound $OUTBOUND_VERSION" source/dae/go.mod
+          scripts/verify-reality-version.sh source/outbound/transport/tls/reality.go 1 8 10
+          test ! -e source/outbound/pkg/jp3diag/jp3diag.go
+          test -z "$(git -C source/dae status --porcelain)"
+          test -z "$(git -C source/outbound status --porcelain)"
+          echo "dae:      $(git -C source/dae rev-parse HEAD)"
+          echo "outbound: $(git -C source/outbound rev-parse HEAD)"
+
+      - name: Apply and audit observability-only patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          patch_file="$GITHUB_WORKSPACE/patches/jp3-diagnostic-1.patch"
+          outbound="$GITHUB_WORKSPACE/source/outbound"
+
+          git -C "$outbound" apply --check --unidiff-zero "$patch_file"
+          git -C "$outbound" apply --unidiff-zero "$patch_file"
+          git -C "$outbound" add -N pkg/jp3diag/jp3diag.go
+
+          scripts/verify-reality-version.sh "$outbound/transport/tls/reality.go" 1 8 10
+          test "$(git -C "$outbound" diff --name-only)" = "$(printf '%s\n' \
+            dialer/v2ray/v2ray.go \
+            pkg/jp3diag/jp3diag.go \
+            protocol/vless/conn.go \
+            transport/grpc/grpc_client.go \
+            transport/tls/reality.go)"
+          git -C "$outbound" diff --check
+          diff -u "$patch_file" <(git -C "$outbound" diff --unified=0 --binary)
+
+          grep -Fq '[JP3DIAG][%s]' "$outbound/pkg/jp3diag/jp3diag.go"
+          grep -Fq 'handshake_not_used' "$outbound/transport/grpc/grpc_client.go"
+          grep -Fq 'handshake_success' "$outbound/transport/tls/reality.go"
+          grep -Fq 'tun_success' "$outbound/transport/grpc/grpc_client.go"
+          grep -Fq 'request_header_written' "$outbound/protocol/vless/conn.go"
+          grep -Fq 'response_header_error' "$outbound/protocol/vless/conn.go"
+          ! grep -Ei 'jp3diag\.Printf.*(uuid|shortid|authkey|publickey|private|password|subscription|pbk|sid)' \
+            "$outbound/transport/tls/reality.go" \
+            "$outbound/transport/grpc/grpc_client.go" \
+            "$outbound/protocol/vless/conn.go"
+          git -C "$outbound" diff --stat
+          git -C "$outbound" diff --unified=3
+
+      - name: Set up Go 1.26
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.26.0
+          cache: false
+
+      - name: Install official build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y clang-15 llvm-15 file binutils
+
+      - name: Test changed outbound packages
+        shell: bash
+        working-directory: source/outbound
+        run: |
+          set -euo pipefail
+          export GOFLAGS="-mod=readonly"
+          gofmt -d \
+            dialer/v2ray/v2ray.go \
+            pkg/jp3diag/jp3diag.go \
+            protocol/vless/conn.go \
+            transport/grpc/grpc_client.go \
+            transport/tls/reality.go | tee "$RUNNER_TEMP/gofmt.diff"
+          test ! -s "$RUNNER_TEMP/gofmt.diff"
+          go test ./pkg/jp3diag ./transport/grpc ./transport/tls ./protocol/vless ./dialer/v2ray
+          test "$(git diff --name-only)" = "$(printf '%s\n' \
+            dialer/v2ray/v2ray.go \
+            pkg/jp3diag/jp3diag.go \
+            protocol/vless/conn.go \
+            transport/grpc/grpc_client.go \
+            transport/tls/reality.go)"
+
+      - name: Point dae at local diagnostic outbound
+        shell: bash
+        working-directory: source/dae
+        run: |
+          set -euo pipefail
+          go mod edit -replace=github.com/daeuniverse/outbound="$GITHUB_WORKSPACE/source/outbound"
+          grep -Fqx "replace github.com/daeuniverse/outbound => $GITHUB_WORKSPACE/source/outbound" go.mod
+          grep -Fqx $'\tgithub.com/daeuniverse/outbound '"$OUTBOUND_REQUIRED_VERSION" go.mod
+          test "$(git diff --name-only)" = "go.mod"
+          git diff --check
+          git diff -- go.mod
+          git diff -- go.mod > "$RUNNER_TEMP/expected-dae-go-mod.patch"
+
+      - name: Download locked dependencies
+        shell: bash
+        working-directory: source/dae
+        run: |
+          set -euo pipefail
+          export GOMODCACHE="$PWD/go-mod"
+          export GOFLAGS="-mod=readonly -modcacherw"
+          go mod download
+          test "$(git diff --name-only)" = "go.mod"
+
+      - name: Build ARM64 binary with official Makefile
+        shell: bash
+        working-directory: source/dae
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          export GOOS=linux
+          export GOARCH=arm64
+          export CGO_ENABLED=0
+          export GOMODCACHE="$PWD/go-mod"
+          export GOFLAGS="-trimpath -mod=readonly -modcacherw"
+          export GOEXPERIMENT="newinliner,simd,heapminimum512kib,randomizedheapbase64"
+          export OUTPUT="$GITHUB_WORKSPACE/dist/$BINARY_NAME"
+          export VERSION="$BUILD_VERSION"
+          export CLANG=clang-15
+          export STRIP=llvm-strip-15
+          make CC=clang
+
+          diff -u "$RUNNER_TEMP/expected-dae-go-mod.patch" <(git diff -- go.mod)
+          test "$(git diff --name-only)" = "go.mod"
+          scripts="$GITHUB_WORKSPACE/scripts/verify-reality-version.sh"
+          "$scripts" ../outbound/transport/tls/reality.go 1 8 10
+          diff -u "$GITHUB_WORKSPACE/patches/jp3-diagnostic-1.patch" \
+            <(git -C ../outbound diff --unified=0 --binary)
+
+      - name: Verify ARM64 artifact and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="dist/$BINARY_NAME"
+          file "$binary" | tee "$RUNNER_TEMP/file.txt"
+          grep -Eq 'ELF 64-bit.*ARM aarch64' "$RUNNER_TEMP/file.txt"
+          ls -lh "$binary"
+          sha256sum "$binary"
+          go version -m "$binary" | tee "$RUNNER_TEMP/go-version-m.txt"
+          grep -F "github.com/daeuniverse/outbound" "$RUNNER_TEMP/go-version-m.txt"
+          grep -F "$GITHUB_WORKSPACE/source/outbound" "$RUNNER_TEMP/go-version-m.txt"
+          grep -F "vcs.revision=$DAE_COMMIT" "$RUNNER_TEMP/go-version-m.txt"
+
+          echo "Diagnostic outbound checkout: $(git -C source/outbound rev-parse HEAD)"
+          sha256sum source/outbound/transport/tls/reality.go patches/jp3-diagnostic-1.patch
+          strings "$binary" > "$RUNNER_TEMP/binary-strings.txt"
+          grep -F "$BUILD_VERSION" "$RUNNER_TEMP/binary-strings.txt"
+          grep -F '[JP3DIAG][%s]' "$RUNNER_TEMP/binary-strings.txt"
+          grep -F 'handshake_not_used' "$RUNNER_TEMP/binary-strings.txt"
+          grep -F 'response_header_error' "$RUNNER_TEMP/binary-strings.txt"
+
+      - name: Prepare release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp patches/jp3-diagnostic-1.patch dist/
+          (
+            cd dist
+            sha256sum "$BINARY_NAME" jp3-diagnostic-1.patch > SHA256SUMS
+          )
+          cat dist/SHA256SUMS
+
+      - name: Upload Actions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dae-jp3-diagnostic-arm64
+          path: |
+            dist/dae-jp3-diagnostic-arm64
+            dist/SHA256SUMS
+            dist/jp3-diagnostic-1.patch
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Create or update GitHub Release
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          name: dae JP3 protocol-stage diagnostic build
+          prerelease: true
+          generate_release_notes: false
+          body: |
+            Experimental, unofficial observability-only build.
+            Baselines: dae 5a51cc747ef9e17185d438dc54ebf32c681984db; olicesx/outbound 52c26f8e759e156d2f5ec97d18590febf74ba8bb.
+            REALITY version remains 1.8.10. No protocol fix or dependency upgrade is included.
+            Logs identify REALITY, gRPC, and VLESS stage outcomes with the JP3DIAG prefix.
+          files: |
+            dist/dae-jp3-diagnostic-arm64
+            dist/SHA256SUMS
+            dist/jp3-diagnostic-1.patch
+          fail_on_unmatched_files: true

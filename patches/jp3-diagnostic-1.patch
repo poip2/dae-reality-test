@@ -1,0 +1,260 @@
+diff --git a/dialer/v2ray/v2ray.go b/dialer/v2ray/v2ray.go
+index 3083918..66affbd 100644
+--- a/dialer/v2ray/v2ray.go
++++ b/dialer/v2ray/v2ray.go
+@@ -165,4 +165,5 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
+-			NextDialer:    d,
+-			ServiceName:   serviceName,
+-			ServerName:    sni,
+-			AllowInsecure: s.AllowInsecure || option.AllowInsecure,
++			NextDialer:         d,
++			ServiceName:        serviceName,
++			ServerName:         sni,
++			AllowInsecure:      s.AllowInsecure || option.AllowInsecure,
++			DiagnosticSecurity: s.TLS,
+diff --git a/pkg/jp3diag/jp3diag.go b/pkg/jp3diag/jp3diag.go
+new file mode 100644
+index 0000000..9b3ac32
+--- /dev/null
++++ b/pkg/jp3diag/jp3diag.go
+@@ -0,0 +1,44 @@
++package jp3diag
++
++import (
++	"net"
++	"strings"
++
++	"github.com/daeuniverse/outbound/pkg/logger"
++)
++
++const (
++	targetHostname = "jp3-r.link-t7.com"
++	targetIPv4     = "13.231.27.232"
++	targetPort     = "10033"
++)
++
++// IsTarget limits diagnostic output to the JP3 proxy endpoint. It never
++// resolves names or changes dialing behavior.
++func IsTarget(address string) bool {
++	host, port, err := net.SplitHostPort(address)
++	if err != nil || port != targetPort {
++		return false
++	}
++	host = strings.TrimSuffix(host, ".")
++	return strings.EqualFold(host, targetHostname) || host == targetIPv4
++}
++
++// EnabledForConn propagates the target-only diagnostic guard through transport
++// wrappers without inspecting payload or authentication data.
++func EnabledForConn(conn any) bool {
++	type diagnosticConn interface {
++		JP3Diagnostic() bool
++	}
++	diagnostic, ok := conn.(diagnosticConn)
++	return ok && diagnostic.JP3Diagnostic()
++}
++
++// Printf writes through outbound's existing logger, which dae directs to its
++// normal stderr/procd logging path.
++func Printf(stage, format string, args ...any) {
++	all := make([]any, 0, len(args)+1)
++	all = append(all, stage)
++	all = append(all, args...)
++	logger.Logger.Printf("[JP3DIAG][%s] "+format, all...)
++}
+diff --git a/protocol/vless/conn.go b/protocol/vless/conn.go
+index 3f742cc..c7650fc 100644
+--- a/protocol/vless/conn.go
++++ b/protocol/vless/conn.go
+@@ -17,0 +18 @@ import (
++	"github.com/daeuniverse/outbound/pkg/jp3diag"
+@@ -42,0 +44 @@ type Conn struct {
++	diagnostic bool
+@@ -53,3 +55,4 @@ func NewConn(conn netproxy.Conn, metadata Metadata, cmdKey []byte) (c *Conn, err
+-		Conn:     conn,
+-		metadata: metadata,
+-		cmdKey:   key,
++		Conn:       conn,
++		metadata:   metadata,
++		cmdKey:     key,
++		diagnostic: jp3diag.EnabledForConn(conn),
+@@ -142 +145,5 @@ func (c *Conn) write(b []byte) (n int, err error) {
+-				return 0, fmt.Errorf("write header: %w", err)
++				err = fmt.Errorf("write header: %w", err)
++				if c.diagnostic {
++					jp3diag.Printf("VLESS", "request_header_error error_type=%T error=%q", err, err)
++				}
++				return 0, err
+@@ -144,0 +152,3 @@ func (c *Conn) write(b []byte) (n int, err error) {
++			if c.diagnostic {
++				jp3diag.Printf("VLESS", "request_header_written")
++			}
+@@ -177,0 +188,3 @@ func (c *Conn) read(b []byte) (n int, err error) {
++				if c.diagnostic {
++					jp3diag.Printf("VLESS", "response_header_error error_type=%T error=%q", err, err)
++				}
+@@ -179,0 +193,3 @@ func (c *Conn) read(b []byte) (n int, err error) {
++			if c.diagnostic {
++				jp3diag.Printf("VLESS", "response_header_ok")
++			}
+diff --git a/transport/grpc/grpc_client.go b/transport/grpc/grpc_client.go
+index a4fcc82..2dae050 100644
+--- a/transport/grpc/grpc_client.go
++++ b/transport/grpc/grpc_client.go
+@@ -16,0 +17 @@ import (
++	"github.com/daeuniverse/outbound/pkg/jp3diag"
+@@ -105,0 +107,4 @@ type ClientConn struct {
++
++	diagnostic       bool
++	recvErrorLogOnce sync.Once
++	sendErrorLogOnce sync.Once
+@@ -108 +113 @@ type ClientConn struct {
+-func NewClientConn(tun proto.GunService_TunClient, closer context.CancelFunc) *ClientConn {
++func NewClientConn(tun proto.GunService_TunClient, closer context.CancelFunc, diagnostic bool) *ClientConn {
+@@ -120,0 +126,20 @@ func NewClientConn(tun proto.GunService_TunClient, closer context.CancelFunc) *C
++		diagnostic:  diagnostic,
++	}
++}
++
++func (c *ClientConn) JP3Diagnostic() bool {
++	return c.diagnostic
++}
++
++func (c *ClientConn) logRecvError(err error) {
++	if !c.diagnostic || err == nil {
++		return
++	}
++	c.recvErrorLogOnce.Do(func() {
++		jp3diag.Printf("GRPC", "recv_error code=%s error_type=%T error=%q", status.Code(err), err, err)
++	})
++}
++
++func (c *ClientConn) logSendError(err error) {
++	if !c.diagnostic || err == nil {
++		return
+@@ -121,0 +147,3 @@ func NewClientConn(tun proto.GunService_TunClient, closer context.CancelFunc) *C
++	c.sendErrorLogOnce.Do(func() {
++		jp3diag.Printf("GRPC", "send_error code=%s error_type=%T error=%q", status.Code(err), err, err)
++	})
+@@ -132,0 +161 @@ func (c *ClientConn) Read(p []byte) (n int, err error) {
++		c.logRecvError(os.ErrDeadlineExceeded)
+@@ -134,0 +164 @@ func (c *ClientConn) Read(p []byte) (n int, err error) {
++		c.logRecvError(io.EOF)
+@@ -165,0 +196 @@ func (c *ClientConn) Read(p []byte) (n int, err error) {
++		c.logRecvError(os.ErrDeadlineExceeded)
+@@ -167,0 +199 @@ func (c *ClientConn) Read(p []byte) (n int, err error) {
++		c.logRecvError(io.EOF)
+@@ -171,0 +204 @@ func (c *ClientConn) Read(p []byte) (n int, err error) {
++			c.logRecvError(err)
+@@ -187,0 +221 @@ func (c *ClientConn) Write(p []byte) (n int, err error) {
++		c.logSendError(os.ErrDeadlineExceeded)
+@@ -189,0 +224 @@ func (c *ClientConn) Write(p []byte) (n int, err error) {
++		c.logSendError(io.EOF)
+@@ -208,0 +244 @@ func (c *ClientConn) Write(p []byte) (n int, err error) {
++		c.logSendError(os.ErrDeadlineExceeded)
+@@ -210,0 +247 @@ func (c *ClientConn) Write(p []byte) (n int, err error) {
++		c.logSendError(io.EOF)
+@@ -212,0 +250 @@ func (c *ClientConn) Write(p []byte) (n int, err error) {
++		c.logSendError(err)
+@@ -355,4 +393,5 @@ type Dialer struct {
+-	NextDialer    netproxy.Dialer
+-	ServiceName   string
+-	ServerName    string
+-	AllowInsecure bool
++	NextDialer         netproxy.Dialer
++	ServiceName        string
++	ServerName         string
++	AllowInsecure      bool
++	DiagnosticSecurity string
+@@ -369,0 +409,11 @@ func (d *Dialer) DialContext(ctx context.Context, network string, address string
++	serviceName := d.ServiceName
++	if serviceName == "" {
++		serviceName = "GunService"
++	}
++	diagnostic := jp3diag.IsTarget(address)
++	if diagnostic && strings.EqualFold(d.DiagnosticSecurity, "reality") {
++		jp3diag.Printf("REALITY", "handshake_not_used remote=%q sni=%q tls_implementation=%q reason=%q", address, d.ServerName, "crypto/tls via grpc-go", "gRPC transport constructs crypto/tls directly")
++	}
++	if diagnostic {
++		jp3diag.Printf("GRPC", "clientconn_start remote=%q sni=%q serviceName=%q tls_implementation=%q", address, d.ServerName, serviceName, "crypto/tls via grpc-go")
++	}
+@@ -372,0 +423,3 @@ func (d *Dialer) DialContext(ctx context.Context, network string, address string
++		if diagnostic {
++			jp3diag.Printf("GRPC", "clientconn_error code=%s error_type=%T error=%q", status.Code(err), err, err)
++		}
+@@ -374,0 +428,3 @@ func (d *Dialer) DialContext(ctx context.Context, network string, address string
++	if diagnostic {
++		jp3diag.Printf("GRPC", "clientconn_success state=%s", meta.cc.GetState())
++	}
+@@ -378,3 +434,3 @@ func (d *Dialer) DialContext(ctx context.Context, network string, address string
+-	serviceName := d.ServiceName
+-	if serviceName == "" {
+-		serviceName = "GunService"
++	path := "/" + serviceName + "/Tun"
++	if diagnostic {
++		jp3diag.Printf("GRPC", "tun_start serviceName=%q path=%q", serviceName, path)
+@@ -386,0 +443,3 @@ func (d *Dialer) DialContext(ctx context.Context, network string, address string
++		if diagnostic {
++			jp3diag.Printf("GRPC", "tun_error code=%s error_type=%T error=%q", status.Code(err), err, err)
++		}
+@@ -389 +448,4 @@ func (d *Dialer) DialContext(ctx context.Context, network string, address string
+-	return NewClientConn(tun, streamCloser), nil
++	if diagnostic {
++		jp3diag.Printf("GRPC", "tun_success path=%q", path)
++	}
++	return NewClientConn(tun, streamCloser, diagnostic), nil
+diff --git a/transport/tls/reality.go b/transport/tls/reality.go
+index 7481a5b..689ff54 100644
+--- a/transport/tls/reality.go
++++ b/transport/tls/reality.go
+@@ -36,0 +37 @@ import (
++	"github.com/daeuniverse/outbound/pkg/jp3diag"
+@@ -241,0 +243 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++	diagnostic := jp3diag.IsTarget(addr)
+@@ -247 +249,5 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
+-			return nil, fmt.Errorf("[REALITY]: dial to %s: %w", addr, err)
++			err = fmt.Errorf("[REALITY]: dial to %s: %w", addr, err)
++			if diagnostic {
++				jp3diag.Printf("REALITY", "handshake_error phase=transport_dial remote=%q error_type=%T error=%q", addr, err, err)
++			}
++			return nil, err
+@@ -259,0 +266,3 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++		if diagnostic {
++			jp3diag.Printf("REALITY", "handshake_start remote=%q sni=%q tls_implementation=%q fingerprint=%q alpn_config_override=%q retry=%d", addr, uConn.ServerName, "uTLS", x.fingerprint.Client, utlsConfig.NextProtos, retry)
++		}
+@@ -267,0 +277,3 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++				if diagnostic {
++					jp3diag.Printf("REALITY", "handshake_error phase=build_state error_type=%T error=%q", err, err)
++				}
+@@ -286 +298,5 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
+-					return nil, errors.New("nil ecdheKey")
++					err = errors.New("nil ecdheKey")
++					if diagnostic {
++						jp3diag.Printf("REALITY", "handshake_error phase=key_share error_type=%T error=%q", err, err)
++					}
++					return nil, err
+@@ -294 +310,5 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
+-				return nil, errors.New("REALITY: SharedKey == nil")
++				err = errors.New("REALITY: SharedKey == nil")
++				if diagnostic {
++					jp3diag.Printf("REALITY", "handshake_error phase=key_agreement error_type=%T error=%q", err, err)
++				}
++				return nil, err
+@@ -296,0 +317,3 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++				if diagnostic {
++					jp3diag.Printf("REALITY", "handshake_error phase=key_derivation error_type=%T error=%q", err, err)
++				}
+@@ -313,0 +337,3 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++			if diagnostic {
++				jp3diag.Printf("REALITY", "handshake_error phase=utls error_type=%T error=%q", err, err)
++			}
+@@ -319,0 +346 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++		state := uConn.ConnectionState()
+@@ -320,0 +348,3 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++			if diagnostic {
++				jp3diag.Printf("REALITY", "handshake_error phase=reality_verification verified=false alpn=%q error=%q", state.NegotiatedProtocol, "REALITY: processed invalid connection")
++			}
+@@ -408,0 +439,3 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
++		if diagnostic {
++			jp3diag.Printf("REALITY", "handshake_success verified=true alpn=%q", state.NegotiatedProtocol)
++		}

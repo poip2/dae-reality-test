@@ -2,6 +2,24 @@
 
 非官方、实验性 dae 构建。不是 dae 官方 release，不建议作为常规升级包使用。
 
+## 实机实验结果
+
+`REALITY client version 1.8.10 -> 26.3.27`：**FAILED TO FIX JP3**。
+
+补丁版 dae 可以正常启动，但 JP3 仍为 `ALIVE --tcp4/6-> NOT ALIVE`。因此 REALITY client version 假设已被实机否定，不再作为当前主要 root cause。
+
+## JP3 diagnostic build
+
+新构建不尝试修复协议，只增加目标限定诊断日志，用于确定失败阶段：REALITY / gRPC / VLESS。REALITY version 保持原始 `1.8.10`。
+
+源码调用链审计显示：dae 创建 node 后进入 outbound VLESS dialer；VLESS 外层调用 gRPC transport；该 baseline 的 gRPC 分支直接由 grpc-go `credentials.NewTLS` 建立 `crypto/tls` transport，再创建 `/<serviceName>/Tun` stream，最后写入并读取 VLESS header。`tls.NewReality` 只在 V2Ray `tcp` transport 分支构造，gRPC 分支没有构造 Reality dialer。diagnostic build 只记录该事实及后续错误，不改变此行为。
+
+- workflow：`.github/workflows/build-jp3-diagnostic.yml`
+- patch：`patches/jp3-diagnostic-1.patch`
+- release tag：`jp3-diagnostic-1`
+- binary/artifact：`dae-jp3-diagnostic-arm64`
+- log prefixes：`[JP3DIAG][REALITY]`、`[JP3DIAG][GRPC]`、`[JP3DIAG][VLESS]`
+
 ## 锁定基线
 
 - dae: `5a51cc747ef9e17185d438dc54ebf32c681984db`
@@ -40,6 +58,6 @@ Workflow：`.github/workflows/build-dae-reality-test.yml`
 
 构建复用该 dae commit 的官方 ARM64 流程：Go 1.26、Ubuntu 22.04、clang/LLVM 15、submodules、官方 Makefile、真实 eBPF 生成、`CGO_ENABLED=0`、`GOARCH=arm64`。
 
-## 假设边界
+## 结论边界
 
-补丁有效目前只是待验证假设。构建成功不能证明 REALITY client version 是根因。只有在同一 OpenWrt、同一配置、同一节点和网络下替换测试二进制后，目标节点从 `NOT ALIVE`/不可用变成 `ALIVE`/可用，才会强力支持此兼容性假设。
+26.3.27 实验已失败，不能解释 JP3 问题。diagnostic build 的编译成功也不证明 root cause；需由 OpenWrt 实机 `[JP3DIAG]` 日志确认实际失败位置。
