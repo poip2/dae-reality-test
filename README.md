@@ -8,6 +8,27 @@
 
 早期独立 `1.8.10 -> 26.3.27` 构建虽未修复 JP3，但当时 gRPC 分支没有调用 REALITY；修改后的版本字节从未进入 JP3 ClientHello。该实验不能排除服务端 `minClientVer`，需要在第一阶段 transport fix 上重新进行有效 A/B。
 
+## REALITY + gRPC production fix build
+
+`grpc-handoff-probe-6` 实机多次完成：`reality_temporary → verified=true → first_send_result → first_recv_result → VLESS response_header_ok`。这证明 JP3 的 TCP → REALITY → gRPC `/update/Tun` → VLESS 全链已打通，也证明 verified REALITY 连接上的空 negotiated ALPN 不能由 security layer 提前判死。
+
+本构建停止 target probe，收敛为通用修复：
+
+- `security=reality + transport=grpc` 使用 REALITY secured context dialer；grpc-go 不再增加第二层 TLS。
+- REALITY AEAD 构造前删除 `X25519MLKEM768` curve/key share，保留 X25519，应用 ALPN 后重新 `BuildHandshakeState()`。
+- REALITY temporary certificate/HMAC `verified=true` 后返回 secured connection，不因空 ALPN 拒绝；gRPC 自己证明应用协议 readiness。
+- 普通 `grpc + TLS` 继续使用 grpc-go TLS credentials 与原有 ALPN 行为。
+- gRPC ClientConn cache 隔离普通/pre-secured 模式及无凭据 opaque transport identity。
+- client version 固定为已实机验证的 `1.8.1`。
+- 无 JP3 判断、无 `DAE_JP3_*` 环境变量、无 target diagnostic logging、无 probe marker。
+
+回归测试覆盖 VLESS+REALITY+gRPC 构造、无双 TLS、普通 TLS/ALPN、MLKEM filter、X25519 auth、verified+空 ALPN handoff、自定义 `/update/Tun` 双向数据，以及 VLESS response header。
+
+- workflow：`.github/workflows/build-reality-grpc-production-fix.yml`
+- patch：`patches/reality-grpc-production-fix-1.patch`
+- release tag：`reality-grpc-production-fix-1`
+- binary/artifact：`dae-reality-grpc-production-fix-arm64`
+
 ## JP3 REALITY-to-gRPC handoff probe build
 
 ALPN probe 实机结果：删除 `X25519MLKEM768` 后 REALITY admission 稳定成功；无论 offer 为 `["h2"]` 还是 `["h2","http/1.1"]`，服务端均返回空 negotiated ALPN。当前失败由客户端 post-REALITY ALPN hard gate 主动产生，HTTP/2/gRPC 尚未获得实际验证机会。
