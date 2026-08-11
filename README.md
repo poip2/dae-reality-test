@@ -8,6 +8,23 @@
 
 早期独立 `1.8.10 -> 26.3.27` 构建虽未修复 JP3，但当时 gRPC 分支没有调用 REALITY；修改后的版本字节从未进入 JP3 ClientHello。该实验不能排除服务端 `minClientVer`，需要在第一阶段 transport fix 上重新进行有效 A/B。
 
+## JP3 REALITY-to-gRPC handoff probe build
+
+ALPN probe 实机结果：删除 `X25519MLKEM768` 后 REALITY admission 稳定成功；无论 offer 为 `["h2"]` 还是 `["h2","http/1.1"]`，服务端均返回空 negotiated ALPN。当前失败由客户端 post-REALITY ALPN hard gate 主动产生，HTTP/2/gRPC 尚未获得实际验证机会。
+
+本轮保持 probe-5 的 wire 输入完全不变：`version=1.8.1`、MLKEM filter、X25519、refraction uTLS、SNI、认证参数及 ALPN offer `["h2","http/1.1"]` 均固定。唯一行为变化：temporary certificate HMAC 匹配且 `verified=true` 后，不再因空 ALPN 关闭连接，而是把已认证连接交给 pre-secured grpc-go。ALPN 仍按真实值记录，不伪造，不恢复第二层 TLS。
+
+`grpc.DialContext()` 与 `NewStream()` 不代表 readiness。日志将 stream 创建改记为 `tun_stream_created readiness_unproven=true`；真正结果依次观察 `first_send_result`、`first_recv_result`、VLESS `request_header_written` 与 `response_header_ok`。
+
+```text
+DAE_JP3_REALITY_PROBE_VERSION=1.8.1
+```
+
+- workflow：`.github/workflows/build-jp3-reality-grpc-handoff-probe.yml`
+- patch：`patches/jp3-reality-grpc-handoff-probe-6.patch`
+- release tag：`jp3-reality-grpc-handoff-probe-6`
+- binary/artifact：`dae-jp3-reality-grpc-handoff-probe-arm64`
+
 ## JP3 sing-box REALITY ALPN probe build
 
 key-share 单变量实机结果已建立因果：删除 `X25519MLKEM768` 后，JP3 从 `public_pki_fallback / admission_rejected` 稳定推进为 `reality_temporary / reality_hmac_match=true / verified=true`。MLKEM hybrid share 是此前 admission failure 的关键 wire 差异，后续构建固定保留该 filter。
